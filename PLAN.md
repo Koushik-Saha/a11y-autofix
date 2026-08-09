@@ -24,10 +24,12 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
    JSX element. Produces a `Patch` (`filePath`, `violationId`, `oldSnippet`
    — owned by `context/`'s AST extraction, not generated — and
    `newSnippet`). Output is _unverified_ at this stage.
-4. **verify/** — Applies the `Patch` to a scratch copy of the component,
-   re-runs `detect/` against it, and confirms: (a) the original violation is
-   gone, (b) no new violations were introduced. Produces
-   `VerificationResult`. Only `passed: true` results are shown to the user.
+4. **verify/** — Applies the `Patch` in memory (the file on disk is never
+   touched), re-runs `detect/` against both the original and patched source,
+   and confirms: (a) the original violation is gone, (b) no new violations
+   were introduced. Produces a `VerificationResult` with
+   `status: 'verified' | 'unverified'` — an unverified result is returned,
+   not discarded, so `cli/` can surface why the patch didn't work.
 5. **cli/** — Wires the above into commands (`scan`, ...), and is the only
    module responsible for user-facing output and prompts.
 
@@ -66,9 +68,9 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
 
 ## Status
 
-`detect/`, `context/`, and `generate/` are implemented. `detect/` and
-`context/` are tested with vitest; `generate/` isn't (see below) — `verify/`
-still throws `Not implemented`.
+`detect/`, `context/`, `generate/`, and `verify/` are all implemented.
+`detect/`, `context/`, and `verify/` are tested with vitest; `generate/`
+isn't (see below). `cli/` is still a stub.
 
 ### Done
 
@@ -77,7 +79,7 @@ still throws `Not implemented`.
 - [x] `src/` structure: `detect/`, `context/`, `generate/`, `verify/`,
       `cli/`, plus `src/index.ts` re-exporting the library API.
 - [x] Type contracts between modules (`AxeViolation`, `FixContext`,
-      `FixDiff`, `VerificationResult`) sketched as interfaces.
+      `Patch`, `VerificationResult`) sketched as interfaces.
 - [x] `cli/index.ts` stub wired up with `commander` (`--version`, a `scan`
       command placeholder).
 - [x] `detect/`: given a component file or directory, compiles it with
@@ -114,13 +116,31 @@ still throws `Not implemented`.
       available — an integration test that mocks `Anthropic.messages.parse`
       would cover the prompt-building and Patch-assembly logic without a
       live call.
+- [x] `verify/`: applies a `Patch` to the component's source in memory
+      (`String.prototype.replace`, guarded to require exactly one
+      occurrence of `oldSnippet` — otherwise throws rather than guessing
+      which occurrence to patch) and re-renders it via `detect/`'s new
+      `detectViolationsInSource` (source text in, never touches disk).
+      Re-runs both the original and patched source through the same
+      pipeline and diffs the two violation sets: `status: 'verified'` only
+      when the target rule id is gone from the patched result _and_ no
+      violation with a rule id absent from the original set appeared. An
+      unresolved patch comes back as `status: 'unverified'` with the
+      `remainingViolations`/`newViolations` that prove it — never thrown
+      away. Refactored `detect/`'s esbuild compile + jsdom-render + axe-run
+      pipeline so both the file-reading path (`detectViolations`) and the
+      in-memory path (`detectViolationsInSource`) share one implementation,
+      per the module-boundaries rule above. Tests: `test/verify.test.ts`
+      covers both the verified and unverified paths (plus a patch that
+      doesn't apply cleanly, which throws).
 
 ### Not started
 
-- [ ] `verify/`: apply a diff to a scratch copy, re-invoke `detect/`,
-      compare before/after violation sets.
 - [ ] `cli/`: real `scan` command output (diff rendering, accept/reject
-      prompt), config file support (API key, ignore patterns).
+      prompt), config file support (API key, ignore patterns) — including
+      rendering `VerificationResult.status` to the user, which is the
+      concrete "surface it, don't discard it" consumer of `verify/`'s
+      output.
 
 ## Open decisions (revisit before implementing)
 
@@ -134,9 +154,9 @@ still throws `Not implemented`.
   resolving React relative to the target and requiring version alignment,
   or switching to a real browser via Playwright for higher-fidelity,
   isolated rendering.
-- Whether `verify/` operates on a temp file or in-memory only.
-- `cli/`'s patch-application step needs `oldSnippet` to occur exactly once
-  in the source file to apply a `Patch` via simple string replacement; a
-  component with two structurally-identical offending elements (rare, but
-  possible) would need position-aware replacement instead. Revisit when
-  implementing `cli/`'s apply step.
+- `verify/` requires `Patch.oldSnippet` to occur exactly once in the
+  current source and throws otherwise (see Done, above) — a component with
+  two structurally-identical offending elements (rare, but possible) needs
+  position-aware replacement instead of a plain string match. `cli/`'s
+  eventual apply-to-disk step will hit the same constraint and should reuse
+  `verify/`'s check rather than re-deriving it.

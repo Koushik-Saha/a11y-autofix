@@ -60,10 +60,18 @@ function resolveComponentFiles(componentPath: string): string[] {
     .sort();
 }
 
+function loaderForPath(absolutePath: string): 'tsx' | 'jsx' {
+  return path.extname(absolutePath) === '.jsx' ? 'jsx' : 'tsx';
+}
+
 /**
- * Compiles a component file (plus its local imports) to a self-contained
+ * Compiles a component (plus its local imports) to a self-contained
  * CommonJS module via esbuild, so it can be `require`d without the caller
- * needing a build step of their own.
+ * needing a build step of their own. Reads from disk unless `source` is
+ * given, in which case that text is compiled as if it lived at
+ * `absolutePath` — used by verify/ to render a patched component without
+ * ever writing it to disk. Either way, imports still resolve against the
+ * real directory on disk via `absWorkingDir`/`resolveDir`.
  *
  * React is bundled in (not left external), which assumes a single, hoisted
  * `react` install shared with this package — true here and for typical
@@ -72,10 +80,19 @@ function resolveComponentFiles(componentPath: string): string[] {
  * call" mismatch against the render harness below; that's an open
  * rendering-approach question noted in PLAN.md, not solved here.
  */
-function loadComponentModule(componentPath: string): unknown {
-  const absoluteComponentPath = path.resolve(componentPath);
+function loadComponentModule(options: { absolutePath: string; source?: string }): unknown {
+  const { absolutePath, source } = options;
   const result = buildSync({
-    entryPoints: [absoluteComponentPath],
+    ...(source === undefined
+      ? { entryPoints: [absolutePath] }
+      : {
+          stdin: {
+            contents: source,
+            resolveDir: path.dirname(absolutePath),
+            sourcefile: path.basename(absolutePath),
+            loader: loaderForPath(absolutePath),
+          },
+        }),
     bundle: true,
     write: false,
     platform: 'node',
@@ -83,12 +100,12 @@ function loadComponentModule(componentPath: string): unknown {
     jsx: 'automatic',
     jsxImportSource: 'react',
     target: 'node18',
-    absWorkingDir: path.dirname(absoluteComponentPath),
+    absWorkingDir: path.dirname(absolutePath),
   });
 
   const output = result.outputFiles[0];
   if (!output) {
-    throw new Error(`esbuild produced no output for ${componentPath}`);
+    throw new Error(`esbuild produced no output for ${absolutePath}`);
   }
 
   const tempDir = mkdtempSync(path.join(tmpdir(), 'a11y-autofix-'));
@@ -199,8 +216,8 @@ function toAxeViolation(violation: AxeResult): AxeViolation {
   };
 }
 
-async function detectViolationsInFile(filePath: string): Promise<AxeViolation[]> {
-  const Component = resolveDefaultExport(loadComponentModule(filePath));
+async function renderAndDetectViolations(componentModule: unknown): Promise<AxeViolation[]> {
+  const Component = resolveDefaultExport(componentModule);
 
   return withJsdomEnvironment(async () => {
     const { container } = render(React.createElement(Component));
@@ -218,6 +235,11 @@ async function detectViolationsInFile(filePath: string): Promise<AxeViolation[]>
   });
 }
 
+async function detectViolationsInFile(filePath: string): Promise<AxeViolation[]> {
+  const absolutePath = path.resolve(filePath);
+  return renderAndDetectViolations(loadComponentModule({ absolutePath }));
+}
+
 export async function detectViolations(options: DetectOptions): Promise<DetectResult> {
   const files = resolveComponentFiles(options.componentPath);
   const violations: AxeViolation[] = [];
@@ -227,4 +249,27 @@ export async function detectViolations(options: DetectOptions): Promise<DetectRe
   }
 
   return { componentPath: options.componentPath, violations };
+}
+
+export interface DetectInSourceOptions {
+  source: string;
+  filePath: string;
+}
+
+/**
+ * Same rendering + axe-core pipeline as `detectViolations`, but takes
+ * component source text directly instead of reading `filePath` from disk.
+ * `filePath` is still used to resolve local imports and to label the
+ * result — the text itself is never written anywhere. This is what
+ * verify/ uses to check a patched component without touching the original
+ * file.
+ */
+export async function detectViolationsInSource(
+  options: DetectInSourceOptions,
+): Promise<DetectResult> {
+  const absolutePath = path.resolve(options.filePath);
+  const violations = await renderAndDetectViolations(
+    loadComponentModule({ absolutePath, source: options.source }),
+  );
+  return { componentPath: absolutePath, violations };
 }
