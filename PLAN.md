@@ -56,11 +56,13 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --FixDiff-->  ve
   CJS) so `detect/` can `require` arbitrary `.tsx`/`.jsx` files without the
   caller needing a build step.
 - **Tests**: `vitest`.
+- **Source parsing**: `ts-morph`, for locating and extracting JSX/TypeScript
+  AST nodes in `context/`.
 
 ## Status
 
-`detect/` is implemented and tested. `context/`, `generate/`, and `verify/`
-still throw `Not implemented`.
+`detect/` and `context/` are implemented and tested. `generate/` and
+`verify/` still throw `Not implemented`.
 
 ### Done
 
@@ -79,11 +81,21 @@ still throw `Not implemented`.
       real layout/canvas, which jsdom can't provide). Tests: `test/detect.test.ts`
       against fixtures in `test/fixtures/` (missing alt text, missing form
       label, a clean control, and a directory scan).
+- [x] `context/`: given a violation, parses the component with ts-morph and
+      locates the offending JSX element structurally — matching axe's target
+      selector's tag name/nth-child/parent against the AST, with the
+      violation's raw HTML attributes as a tie-breaker — never by
+      string-matching source text. Extracts the element, its immediate JSX
+      parent, sibling elements, and (when present) the first typed
+      component parameter's prop type. Tests: `test/context.test.ts` runs
+      `detectViolations` then `gatherContext` on the real result for three
+      fixtures, asserting the located node/parent/siblings/line-number and,
+      for `TypedMissingAlt.tsx`, the resolved prop type text. Related-file
+      resolution (surrounding files, conventions) is not implemented —
+      `relatedFiles` is always `[]`.
 
 ### Not started
 
-- [ ] `context/`: read source files, resolve imports/related files for
-      prompt context.
 - [ ] `generate/`: prompt design for Claude, diff parsing/formatting.
 - [ ] `verify/`: apply a diff to a scratch copy, re-invoke `detect/`,
       compare before/after violation sets.
