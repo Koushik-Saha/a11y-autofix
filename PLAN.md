@@ -51,12 +51,16 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --FixDiff-->  ve
 - **Lint/format**: ESLint 9 flat config (`typescript-eslint`) + Prettier,
   with `eslint-config-prettier` disabling stylistic overlap.
 - **Dev loop**: `tsx` for running the CLI from source without a build step.
+- **Headless rendering**: `jsdom` + `@testing-library/react`, with target
+  component files compiled on the fly via `esbuild` (bundled, JSX-transformed
+  CJS) so `detect/` can `require` arbitrary `.tsx`/`.jsx` files without the
+  caller needing a build step.
+- **Tests**: `vitest`.
 
 ## Status
 
-Scaffold only — no pipeline logic implemented yet. Every exported function in
-`detect/`, `context/`, `generate/`, and `verify/` currently throws
-`Not implemented`.
+`detect/` is implemented and tested. `context/`, `generate/`, and `verify/`
+still throw `Not implemented`.
 
 ### Done
 
@@ -68,11 +72,16 @@ Scaffold only — no pipeline logic implemented yet. Every exported function in
       `FixDiff`, `VerificationResult`) sketched as interfaces.
 - [x] `cli/index.ts` stub wired up with `commander` (`--version`, a `scan`
       command placeholder).
+- [x] `detect/`: given a component file or directory, compiles it with
+      esbuild (bundled, JSX-transformed CJS), renders it into a
+      per-call jsdom environment via `@testing-library/react`, and runs
+      axe-core against the result (`color-contrast` disabled — it needs
+      real layout/canvas, which jsdom can't provide). Tests: `test/detect.test.ts`
+      against fixtures in `test/fixtures/` (missing alt text, missing form
+      label, a clean control, and a directory scan).
 
 ### Not started
 
-- [ ] `detect/`: render a React component in a headless DOM (jsdom or
-      Playwright — TBD) and run axe-core against it.
 - [ ] `context/`: read source files, resolve imports/related files for
       prompt context.
 - [ ] `generate/`: prompt design for Claude, diff parsing/formatting.
@@ -80,13 +89,19 @@ Scaffold only — no pipeline logic implemented yet. Every exported function in
       compare before/after violation sets.
 - [ ] `cli/`: real `scan` command output (diff rendering, accept/reject
       prompt), config file support (API key, ignore patterns).
-- [ ] Tests (framework TBD — likely `vitest`).
 
 ## Open decisions (revisit before implementing)
 
-- How to render React components headlessly for `detect/`/`verify/`:
-  jsdom + `@testing-library/react` vs. a real browser via Playwright.
-  Affects fidelity of detected violations vs. setup weight.
+- Rendering headlessly via jsdom (settled for `detect/`, see Tech choices)
+  assumes a single hoisted `react` shared between this package and the
+  scanned target. A target with its own separately installed React copy
+  could hit a duplicate-React / "invalid hook call" mismatch, since
+  `detect/` bundles the target's React via esbuild but renders through this
+  package's own `@testing-library/react`. Revisit if/when `verify/` or
+  real-world usage against external projects surfaces this — options include
+  resolving React relative to the target and requiring version alignment,
+  or switching to a real browser via Playwright for higher-fidelity,
+  isolated rendering.
 - Diff format from `generate/`: unified diff string vs. structured
   file-replacement — affects both the Claude prompt and how `cli/`
   renders/applies it.
