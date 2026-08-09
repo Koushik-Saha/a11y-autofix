@@ -1,0 +1,53 @@
+{
+  "name": "a11y-autofix",
+  "version": "0.1.0",
+  "description": "Scans React components with axe-core, generates verified WCAG fix diffs via the Claude API, and re-runs axe-core to confirm each fix before showing it to you.",
+  "keywords": [
+    "accessibility",
+    "a11y",
+    "axe-core",
+    "react",
+    "wcag",
+    "cli",
+    "claude"
+  ],
+  "license": "MIT",
+  "author": "",
+  "bin": {
+    "a11y-autofix": "./dist/cli/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "axe-core": "^4.10.0",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.14.0",
+    "@types/node": "^22.9.0",
+    "eslint": "^9.14.0",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.15.0",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.14.0"
+  }
+}
