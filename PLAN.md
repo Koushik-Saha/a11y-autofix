@@ -8,10 +8,10 @@ proven to actually resolve the violation.
 ## Pipeline
 
 ```
-detect/  --violations-->  context/  --FixContext-->  generate/  --FixDiff-->  verify/  --VerificationResult-->  cli/
-   ^                                                                              |
-   |                                                                              |
-   +------------------------- re-run axe-core against the patched component -----+
+detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  verify/  --VerificationResult-->  cli/
+   ^                                                                            |
+   |                                                                            |
+   +----------------------- re-run axe-core against the patched component -----+
 ```
 
 1. **detect/** — Renders the target React component(s) and runs axe-core
@@ -19,10 +19,12 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --FixDiff-->  ve
 2. **context/** — For a given violation, gathers the source code and any
    related project context (surrounding files, conventions) needed to
    reason about a fix. Produces `FixContext`.
-3. **generate/** — Sends the `FixContext` to the Claude API and gets back a
-   proposed patch plus a plain-language explanation. Produces `FixDiff`.
-   Output is _unverified_ at this stage.
-4. **verify/** — Applies the `FixDiff` to a scratch copy of the component,
+3. **generate/** — Sends the `FixContext` to the Claude API, constrained via
+   structured output to return only a replacement for the single located
+   JSX element. Produces a `Patch` (`filePath`, `violationId`, `oldSnippet`
+   — owned by `context/`'s AST extraction, not generated — and
+   `newSnippet`). Output is _unverified_ at this stage.
+4. **verify/** — Applies the `Patch` to a scratch copy of the component,
    re-runs `detect/` against it, and confirms: (a) the original violation is
    gone, (b) no new violations were introduced. Produces
    `VerificationResult`. Only `passed: true` results are shown to the user.
@@ -58,11 +60,15 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --FixDiff-->  ve
 - **Tests**: `vitest`.
 - **Source parsing**: `ts-morph`, for locating and extracting JSX/TypeScript
   AST nodes in `context/`.
+- **Structured output**: `zod` + `@anthropic-ai/sdk`'s `messages.parse()` /
+  `zodOutputFormat()` in `generate/`, to constrain the model's response to
+  a single typed field rather than parsing free text.
 
 ## Status
 
-`detect/` and `context/` are implemented and tested. `generate/` and
-`verify/` still throw `Not implemented`.
+`detect/`, `context/`, and `generate/` are implemented. `detect/` and
+`context/` are tested with vitest; `generate/` isn't (see below) — `verify/`
+still throws `Not implemented`.
 
 ### Done
 
@@ -93,10 +99,24 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --FixDiff-->  ve
       for `TypedMissingAlt.tsx`, the resolved prop type text. Related-file
       resolution (surrounding files, conventions) is not implemented —
       `relatedFiles` is always `[]`.
+- [x] `generate/`: sends the located element (plus parent/siblings/prop
+      types as context only) to Claude, with structured output
+      (`output_config.format` via `zodOutputFormat`) constraining the
+      response to a single `newSnippet` field — the model is never asked to
+      reproduce the original element, so `oldSnippet` on the returned
+      `Patch` always comes verbatim from `context/`'s AST extraction. Not
+      unit-tested — it calls the live Claude API with no mocking layer, and
+      this environment has no Anthropic credentials to run it against.
+      Verified instead by running the real `detect/` → `context/` →
+      `generate/` chain against a fixture and confirming it fails at
+      credential resolution (i.e. after full request construction), not at
+      any earlier step. Revisit once `verify/` exists and/or credentials are
+      available — an integration test that mocks `Anthropic.messages.parse`
+      would cover the prompt-building and Patch-assembly logic without a
+      live call.
 
 ### Not started
 
-- [ ] `generate/`: prompt design for Claude, diff parsing/formatting.
 - [ ] `verify/`: apply a diff to a scratch copy, re-invoke `detect/`,
       compare before/after violation sets.
 - [ ] `cli/`: real `scan` command output (diff rendering, accept/reject
@@ -114,7 +134,9 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --FixDiff-->  ve
   resolving React relative to the target and requiring version alignment,
   or switching to a real browser via Playwright for higher-fidelity,
   isolated rendering.
-- Diff format from `generate/`: unified diff string vs. structured
-  file-replacement — affects both the Claude prompt and how `cli/`
-  renders/applies it.
 - Whether `verify/` operates on a temp file or in-memory only.
+- `cli/`'s patch-application step needs `oldSnippet` to occur exactly once
+  in the source file to apply a `Patch` via simple string replacement; a
+  component with two structurally-identical offending elements (rare, but
+  possible) would need position-aware replacement instead. Revisit when
+  implementing `cli/`'s apply step.

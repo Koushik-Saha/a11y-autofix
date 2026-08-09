@@ -1,12 +1,12 @@
 /**
- * verify/ — applies a proposed FixDiff to a scratch copy of the component,
+ * verify/ — applies a proposed Patch to a scratch copy of the component,
  * re-runs axe-core (via detect/), and confirms the original violation is
  * gone and no new violations were introduced. Only verified fixes are
  * surfaced to the user by cli/.
  */
 
 import type { AxeViolation } from '../detect';
-import type { FixDiff } from '../generate';
+import type { Patch } from '../generate';
 
 export interface VerificationResult {
   passed: boolean;
@@ -16,7 +16,7 @@ export interface VerificationResult {
 }
 
 export interface VerifyFixOptions {
-  diff: FixDiff;
+  patch: Patch;
   originalViolation: AxeViolation;
 }
 
