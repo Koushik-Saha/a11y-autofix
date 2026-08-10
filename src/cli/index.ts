@@ -1,32 +1,30 @@
 #!/usr/bin/env node
 
 /**
- * cli/ — the bin entry point. Wires detect/ -> context/ -> generate/ -> verify/
- * into a single scan command and renders verified fix diffs for the user.
+ * cli/ — the bin entry point. Renders the results of scan/'s
+ * detect -> context -> generate -> verify pipeline to the terminal: a
+ * unified diff plus a verified/unverified/errored outcome for every
+ * violation, an optional --write of verified fixes to disk, and a summary
+ * line with a non-zero exit code when anything is left unresolved.
  *
  * `runScan` is exported (not just invoked via commander) so it can be
  * driven directly in tests without going through process.argv/process.exit.
  * `program.parse` only runs when this file is executed directly.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { Command } from 'commander';
 
-import { detectViolations, resolveComponentFiles } from '../detect';
 import type { AxeViolation } from '../detect';
-import { gatherContext } from '../context';
-import { generateFix } from '../generate';
 import type { Patch } from '../generate';
-import { applyPatchToSource, verifyFix } from '../verify';
+import type { ScanOptions, ScanResult, ScanViolationResult } from '../scan';
+import { scan } from '../scan';
 import type { VerificationResult } from '../verify';
 
 import { version } from '../../package.json';
 
-export interface ScanOptions {
-  write?: boolean;
-}
+export type { ScanOptions } from '../scan';
 
 export interface ScanSummary {
   filesScanned: number;
@@ -79,104 +77,74 @@ function printVerificationOutcome(result: VerificationResult, applied: boolean):
   }
 }
 
-async function scanFile(file: string, options: ScanOptions, summary: ScanSummary): Promise<void> {
-  const { violations } = await detectViolations({ componentPath: file });
-  if (violations.length === 0) return;
+function printViolationResult(entry: ScanViolationResult): void {
+  printViolationHeader(entry.violation);
 
-  console.log(`\n${displayPath(path.resolve(file))}`);
-
-  for (const violation of violations) {
-    summary.violationsFound += 1;
-    printViolationHeader(violation);
-
-    let contextResult;
-    try {
-      contextResult = await gatherContext({ violation, componentPath: file });
-    } catch (error) {
-      summary.errored += 1;
-      console.log(`  [error] could not locate a fixable JSX node: ${(error as Error).message}`);
-      continue;
-    }
-
-    let patch: Patch;
-    try {
-      patch = await generateFix({ context: contextResult });
-    } catch (error) {
-      summary.errored += 1;
-      console.log(`  [error] could not generate a fix: ${(error as Error).message}`);
-      continue;
-    }
-
-    let result: VerificationResult;
-    try {
-      result = await verifyFix({ patch, originalViolation: violation });
-    } catch (error) {
-      summary.errored += 1;
-      console.log(`  [error] could not verify the generated fix: ${(error as Error).message}`);
-      continue;
-    }
-
-    console.log(
-      renderUnifiedDiff(
-        displayPath(path.resolve(file)),
-        contextResult.element.location.startLine,
-        patch,
-      ),
-    );
-
-    let applied = false;
-    if (result.status === 'verified' && options.write) {
-      const currentSource = readFileSync(patch.filePath, 'utf8');
-      writeFileSync(patch.filePath, applyPatchToSource(currentSource, patch), 'utf8');
-      applied = true;
-    }
-    printVerificationOutcome(result, applied);
-
-    if (result.status === 'verified') {
-      summary.verified += 1;
-    } else {
-      summary.unverified += 1;
-    }
+  if (entry.status === 'errored') {
+    console.log(`  [error] ${entry.error}`);
+    return;
   }
+
+  console.log(
+    renderUnifiedDiff(
+      displayPath(entry.filePath),
+      entry.context.element.location.startLine,
+      entry.patch,
+    ),
+  );
+  printVerificationOutcome(entry.verification, entry.applied);
 }
 
-export async function runScan(targetPath: string, options: ScanOptions = {}): Promise<ScanSummary> {
+function printScanResult(result: ScanResult): ScanSummary {
   const summary: ScanSummary = {
-    filesScanned: 0,
-    violationsFound: 0,
+    filesScanned: result.filesScanned,
+    violationsFound: result.violations.length,
     verified: 0,
     unverified: 0,
     errored: 0,
   };
 
-  const absoluteTarget = path.resolve(targetPath);
-  let files: string[];
-  try {
-    files = resolveComponentFiles(absoluteTarget);
-  } catch (error) {
-    console.error(`Could not read path "${targetPath}": ${(error as Error).message}`);
-    process.exitCode = 1;
+  if (result.violations.length === 0) {
+    console.log(`No accessibility violations found in ${displayPath(result.targetPath)}.`);
     return summary;
   }
 
-  for (const file of files) {
-    summary.filesScanned += 1;
-    await scanFile(file, options, summary);
-  }
+  let currentFile: string | null = null;
+  for (const entry of result.violations) {
+    if (entry.filePath !== currentFile) {
+      currentFile = entry.filePath;
+      console.log(`\n${displayPath(currentFile)}`);
+    }
 
-  if (summary.violationsFound === 0) {
-    console.log(`No accessibility violations found in ${displayPath(absoluteTarget)}.`);
-    return summary;
-  }
+    printViolationResult(entry);
 
-  const resolvedCount = options.write ? summary.verified : 0;
-  const unresolvedCount = summary.violationsFound - resolvedCount;
+    if (entry.status === 'verified') summary.verified += 1;
+    else if (entry.status === 'unverified') summary.unverified += 1;
+    else summary.errored += 1;
+  }
 
   console.log(
     `\n${summary.violationsFound} violation(s) found across ${summary.filesScanned} file(s): ` +
       `${summary.verified} verified, ${summary.unverified} unverified, ${summary.errored} errored.`,
   );
 
+  return summary;
+}
+
+export async function runScan(targetPath: string, options: ScanOptions = {}): Promise<ScanSummary> {
+  let result: ScanResult;
+  try {
+    result = await scan(targetPath, options);
+  } catch (error) {
+    console.error(`Could not read path "${targetPath}": ${(error as Error).message}`);
+    process.exitCode = 1;
+    return { filesScanned: 0, violationsFound: 0, verified: 0, unverified: 0, errored: 0 };
+  }
+
+  const summary = printScanResult(result);
+
+  const resolvedCount = options.write ? summary.verified : 0;
+  const unresolvedCount = summary.violationsFound - resolvedCount;
   if (unresolvedCount > 0) {
     process.exitCode = 1;
   }

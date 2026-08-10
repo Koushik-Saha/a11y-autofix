@@ -8,9 +8,9 @@ proven to actually resolve the violation.
 ## Pipeline
 
 ```
-detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  verify/  --VerificationResult-->  cli/
-   ^                                                                            |
-   |                                                                            |
+detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  verify/  --VerificationResult-->  scan()  --ScanResult-->  cli/
+   ^                                                                            |                                          |
+   |                                                                            |                                          +-> library consumers
    +----------------------- re-run axe-core against the patched component -----+
 ```
 
@@ -29,11 +29,16 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
    and confirms: (a) the original violation is gone, (b) no new violations
    were introduced. Produces a `VerificationResult` with
    `status: 'verified' | 'unverified'` — an unverified result is returned,
-   not discarded, so `cli/` can surface why the patch didn't work.
-5. **cli/** — Wires the above into a `scan <path>` command: prints each
-   violation plus its fix as a unified diff, applies verified fixes to disk
-   with `--write`, and never auto-applies an unverified one. The only
-   module responsible for user-facing output.
+   not discarded, so callers can surface why the patch didn't work.
+5. **scan** (`src/scan.ts`) — Orchestrates 1–4 over a file or directory,
+   applying verified patches to disk when `write` is requested (never
+   unverified ones), and returns a structured `ScanResult`. This is the
+   shared core: both `cli/` and the public library API (`import { scan }
+from 'a11y-autofix'`) call into it.
+6. **cli/** — Renders a `ScanResult` to the terminal as unified diffs plus a
+   verified/unverified/errored outcome per violation, and sets the process
+   exit code. The only module responsible for user-facing output; it does
+   no pipeline work of its own.
 
 ## Module boundaries
 
@@ -42,10 +47,16 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
 - `context/` depends only on `detect/`'s types (an `AxeViolation`).
 - `generate/` depends only on `context/`'s types (a `FixContext`) and is the
   only module that talks to the Claude API.
-- `cli/` is the sole consumer of all four modules and the only place that
-  does I/O with the terminal (prompts, diff rendering, colors).
-- `src/index.ts` re-exports the four pipeline modules for programmatic
-  (non-CLI) use as a library.
+- `scan.ts` is the sole consumer of all four pipeline modules and contains
+  all the orchestration logic (including the `write`-to-disk side effect,
+  reusing `verify/`'s `applyPatchToSource`) — it does no terminal I/O.
+- `cli/` is the sole consumer of `scan.ts` and the only place that does I/O
+  with the terminal (diff rendering, `process.exitCode`); it holds no
+  pipeline logic of its own.
+- `src/index.ts` re-exports the four pipeline modules plus `scan` for
+  programmatic (non-CLI) use as a library — this is what
+  `import { scan } from 'a11y-autofix'` resolves to, wired via
+  `package.json`'s `exports` field.
 
 ## Tech choices
 
@@ -70,8 +81,11 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
 
 ## Status
 
-All five modules are implemented, and `npx a11y-autofix` works locally via
-`npm link`. `detect/`, `context/`, `verify/`, and `cli/` are tested with
+All modules — `detect/`, `context/`, `generate/`, `verify/`, `scan.ts`, and
+`cli/` — are implemented. `npx a11y-autofix` works locally via `npm link`,
+and so does `import { scan } from 'a11y-autofix'` (verified from a genuinely
+separate consumer project, both CJS `require` and ESM `import`).
+`detect/`, `context/`, `verify/`, `scan.ts`, and `cli/` are tested with
 vitest; `generate/` isn't (see below).
 
 ### Done
@@ -135,36 +149,54 @@ vitest; `generate/` isn't (see below).
       per the module-boundaries rule above. Tests: `test/verify.test.ts`
       covers both the verified and unverified paths (plus a patch that
       doesn't apply cleanly, which throws).
-- [x] `cli/`: `scan <path>` runs detect → context → generate → verify per
-      violation and prints a unified diff (`--- a/`/`+++ b/`/`@@ ... @@`
-      hunk, using `context.element.location.startLine` for the header) for
-      every proposed fix, verified or not. `--write` applies a verified
-      fix to disk immediately, re-reading the file fresh each time so
-      multiple fixes to the same file layer correctly; an unverified fix
-      is always printed (with the `remainingViolations`/`newViolations`
-      that explain why) and is never written, `--write` or not — enforced
-      by reusing `verify/`'s new exported `applyPatchToSource` guard (same
-      exactly-one-occurrence check as `verifyFix` itself) rather than a
-      second copy of that logic. Exit code is 1 whenever a violation is
-      still unresolved at the end of the run (everything, in print-only
-      mode; only unverified/errored ones, in `--write` mode). `detect/`'s
-      internal `resolveComponentFiles` is now exported so `cli/` can list a
-      directory's component files and run the per-file pipeline against
-      each one individually (`detectViolations` itself still aggregates a
-      whole directory into one flat list with no per-violation file
-      attribution, which is fine for its own tests but not enough for
-      `cli/`'s needs). `runScan` is exported separately from the
-      `program.parse` call (gated on `require.main === module`) so tests
-      can drive it directly. Tests: `test/cli.test.ts` mocks only
-      `generateFix` (the sole piece needing live Claude credentials) and
-      runs the real detect/context/verify pipeline against scratch fixture
-      copies — covers a verified fix applied with `--write`, an unverified
-      fix left untouched despite `--write`, a verified fix left unwritten
-      without `--write`, and a clean component that never calls
-      `generateFix`. Confirmed working end to end via the real binary:
-      `npm link` + `npx a11y-autofix scan <path>` against both a clean and
-      a violating fixture, and `--version`/`--help` on both the top-level
-      command and `scan`.
+- [x] `scan.ts`: orchestrates detect → context → generate → verify per
+      violation for every file at a target path and returns a `ScanResult`
+      (`{ targetPath, filesScanned, violations }`). Each entry in
+      `violations` is a discriminated union on `status` —
+      `'verified' | 'unverified'` entries carry `context`/`patch`/
+      `verification`/`applied`; `'errored'` entries (context/generate/verify
+      threw — an unfixable JSX node, a Claude API error, a bad patch) carry
+      just `error`, and don't abort the rest of the scan. `write: true`
+      applies verified fixes to disk immediately per violation, re-reading
+      the file fresh each time so multiple fixes to the same file layer
+      correctly (reuses `verify/`'s exported `applyPatchToSource` guard,
+      not a second copy of that logic); unverified fixes are never written,
+      `write` or not. `detect/`'s internal `resolveComponentFiles` is
+      exported so this can list a directory's component files and run the
+      per-file pipeline against each one (`detectViolations` itself still
+      aggregates a whole directory into one flat, file-unattributed
+      violation list — fine for its own tests, not enough here). Throws
+      only if `targetPath` doesn't exist. Tests: `test/scan.test.ts` mocks
+      only `generateFix` (the sole piece needing live Claude credentials)
+      and runs the real detect/context/verify pipeline against scratch
+      fixture copies — covers verified+applied, unverified+never-written
+      (even with `write: true`), verified-but-not-written (`write` unset),
+      an errored entry, a directory scan across a violating and a clean
+      file, and the nonexistent-path throw.
+- [x] `cli/`: reduced to a thin renderer over `scan.ts` — calls `scan()`,
+      then prints a unified diff (`--- a/`/`+++ b/`/`@@ ... @@` hunk, using
+      `context.element.location.startLine` for the header) and a
+      verified/unverified/errored outcome line for every violation, plus a
+      summary line. Exit code is 1 whenever a violation is still unresolved
+      at the end of the run (everything, in print-only mode;
+      unverified/errored only, in `--write` mode). `runScan` is exported
+      separately from the `program.parse` call (gated on
+      `require.main === module`) so tests can drive it directly. Tests:
+      `test/cli.test.ts` (unchanged from before the `scan.ts` extraction —
+      still mocks only `generateFix`) confirms the CLI's printed output and
+      write behavior are identical post-refactor. Confirmed working end to
+      end via the real binary: `npm link` + `npx a11y-autofix scan <path>`
+      against both a clean and a violating fixture, and `--version`/`--help`
+      on both the top-level command and `scan`.
+- [x] Public library API: `import { scan } from 'a11y-autofix'` — same
+      `scan.ts` function the CLI calls, just without any printing.
+      `package.json` gained an `exports` map (`"."` → `dist/index.d.ts` /
+      `dist/index.js`) so the package resolves cleanly for both `require`
+      and `import` consumers (verified from a separate scratch project
+      linked via `npm link a11y-autofix`, both CJS and ESM). `src/index.ts`
+      now re-exports `scan.ts` alongside the four pipeline modules.
+      `README.md` documents both the CLI and the programmatic API,
+      including the `ScanViolationResult` status table.
 
 ### Not started
 
