@@ -24,7 +24,7 @@
   },
   "homepage": "https://github.com/Koushik-Saha/a11y-autofix#readme",
   "bin": {
-    "a11y-autofix": "./dist/cli/index.js"
+    "a11y-autofix": "dist/cli/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
