@@ -1,6 +1,11 @@
 # a11y-autofix
 
-Scans React components with [axe-core](https://github.com/dequelabs/axe-core), generates a proposed fix for each violation via the Claude API, and re-runs axe-core against the patched component before showing it to you. **No fix is ever surfaced or applied unless it has been proven to actually resolve the violation** — an unresolved fix is shown as `unverified`, never silently discarded and never auto-applied.
+[![CI](https://github.com/Koushik-Saha/a11y-autofix/actions/workflows/ci.yml/badge.svg)](https://github.com/Koushik-Saha/a11y-autofix/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
+**Every accessibility tool that fixes issues automatically is paid — this one is free.**
+
+`a11y-autofix` scans React components with [axe-core](https://github.com/dequelabs/axe-core), generates a proposed fix for each violation via the Claude API, and re-runs axe-core against the patched component before showing it to you. No fix is ever surfaced or applied unless it has been proven to actually resolve the violation — an unresolved fix is shown as `unverified`, never silently discarded and never auto-applied.
 
 ## Install
 
@@ -82,7 +87,9 @@ for (const entry of result.violations) {
 
 The individual pipeline stages (`detectViolations`, `gatherContext`, `generateFix`, `verifyFix`) are also exported, if you want to drive the pipeline yourself instead of using `scan()`.
 
-## How it works
+## How the verify loop works
+
+This is the part that makes the tool trustworthy rather than just plausible. The core risk with any LLM-generated fix is that the model _says_ it fixed something but didn't — so nothing here takes Claude's word for it.
 
 ```
 detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  verify/  --VerificationResult-->  cli/ / scan()
@@ -91,10 +98,23 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
    +----------------------- re-run axe-core against the patched component -----+
 ```
 
-1. **detect** renders the component(s) and runs axe-core against them.
-2. **context** locates the exact JSX element behind a violation by parsing the component's AST (not by string-matching), and extracts it, its parent, its siblings, and its prop types.
-3. **generate** sends that to Claude, constrained to return only a replacement for that one element — nothing else in the file is touched.
-4. **verify** applies the patch in memory (never to disk), re-renders, and re-runs axe-core to confirm the violation is actually gone and nothing new broke.
-5. **cli** / **scan()** render or return the result.
+1. **detect** renders your component in a real DOM (jsdom + `@testing-library/react`) and runs axe-core against it — real accessibility testing, not pattern matching.
+2. **context** locates the exact JSX element behind a violation by parsing the component's AST — never by string-matching source text — and extracts it, its parent, its siblings, and its prop types, so the model has real surrounding context to work from.
+3. **generate** sends Claude only that one element and constrains its response, via structured output, to a single field: the replacement JSX. It cannot touch the parent, the siblings, or anything else in the file.
+4. **verify** is the trust boundary. It applies the proposed patch to the component's source **in memory only** — the file on disk is never modified at this stage — re-renders the patched component, and re-runs axe-core against it. Two things have to be true for a fix to pass:
+   - the original violation is actually gone, and
+   - no new violation was introduced by the fix.
 
-See [`PLAN.md`](./PLAN.md) for the full module-by-module design notes and open decisions.
+   Only a fix that clears both checks is marked `verified`. Everything else — a fix that didn't fully resolve the issue, or fixed one thing while breaking another — comes back `unverified`, carrying the exact violations that prove it. It is never discarded, and it is never written to your files, `--write` or not.
+
+If you run with `--write`, this is also the only thing that decides what touches disk: verified fixes get applied, unverified ones don't, full stop. The test suite (`verify.test.ts`, `scan.test.ts`, `cli.test.ts`) covers both directions directly — a fix that genuinely resolves a violation, and a fix that changes something irrelevant and is correctly caught and rejected — so this isn't just a design claim, it's asserted behavior you can read and re-run yourself.
+
+See [`PLAN.md`](./PLAN.md) for the full module-by-module design notes, including known limitations (e.g. `color-contrast` currently can't be detected — jsdom has no real paint implementation for axe-core to measure against) and open decisions.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for setup, the development loop, and what to check before opening a PR.
+
+## License
+
+[MIT](./LICENSE)

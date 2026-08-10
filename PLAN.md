@@ -213,6 +213,26 @@ vitest; `generate/` isn't (see below).
       that `color-contrast` produces zero violations under the current
       config. See the prompt-quality review below for what this can't
       tell us, and the concrete findings from a static prompt read.
+- [x] npm-publish prep (2026-08-10): `package.json` gained `repository`,
+      `bugs`, and `homepage` (pointing at the GitHub repo) plus two more
+      keywords; `files: ["dist"]` and the `exports` map were already in
+      place from earlier work. `npm pack --dry-run` confirmed the tarball
+      contains exactly `dist/`, `LICENSE`, `README.md`, and `package.json`
+      — nothing from `src/`, `test/`, or the project's own markdown docs
+      leaks in. Added root `LICENSE` (MIT) and `CONTRIBUTING.md` (setup,
+      dev loop, the pre-PR check list, and a note on how the test suite
+      avoids needing live Claude credentials for anything but `generate/`
+      itself). Added `.github/workflows/ci.yml`, running
+      typecheck/lint/format:check/build/test on every PR and push to
+      `main`, matrixed across Node 18.x and 20.x — both versions were
+      verified locally first (via `nvm`, in an isolated copy of the repo)
+      to confirm the `engines: ">=18"` claim is actually true, not just
+      asserted. Rewrote `README.md` to lead with the free-vs-paid framing,
+      then install/CLI/programmatic usage, then a detailed "How the verify
+      loop works" section — the credibility section — spelling out the
+      four pipeline stages and the two conditions (`remainingViolations`
+      empty, `newViolations` empty) a fix must clear to be marked
+      `verified`, with a pointer to the tests that assert both outcomes.
 
 ### Not started
 

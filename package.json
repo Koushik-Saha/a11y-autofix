@@ -9,10 +9,20 @@
     "react",
     "wcag",
     "cli",
-    "claude"
+    "claude",
+    "auto-fix",
+    "accessibility-testing"
   ],
   "license": "MIT",
   "author": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Koushik-Saha/a11y-autofix.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Koushik-Saha/a11y-autofix/issues"
+  },
+  "homepage": "https://github.com/Koushik-Saha/a11y-autofix#readme",
   "bin": {
     "a11y-autofix": "./dist/cli/index.js"
   },
