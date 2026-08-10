@@ -198,6 +198,22 @@ vitest; `generate/` isn't (see below).
       `README.md` documents both the CLI and the programmatic API,
       including the `ScanViolationResult` status table.
 
+- [x] Fixture coverage for the 5 target violation types (2026-08-10):
+      added `MissingButtonName.tsx` (`button-name` — icon-only close
+      button), `MissingLinkName.tsx` (`link-name` — empty anchor next to a
+      heading), `DuplicateLandmarks.tsx` (`landmark-unique` — two unlabeled
+      `<nav>`s), and `LowContrastText.tsx` (`color-contrast` — see below).
+      Alt text and form labels were already covered by `MissingAlt.tsx` /
+      `MissingLabel.tsx`. `test/pipeline-e2e.test.ts` runs the real
+      detect → context → verify pipeline (generateFix mocked with a
+      hand-authored "ideal" fix per type, same approach as `scan.test.ts`)
+      against all 5 and asserts `status: 'verified'` for each — this
+      confirms the pipeline _mechanics_ (AST location, patch application,
+      re-verification) work for every type, plus an explicit assertion
+      that `color-contrast` produces zero violations under the current
+      config. See the prompt-quality review below for what this can't
+      tell us, and the concrete findings from a static prompt read.
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal
@@ -229,3 +245,96 @@ vitest; `generate/` isn't (see below).
   `detectViolations` once per file instead). Worth revisiting if another
   caller ever needs directory-wide results with per-violation file
   attribution in one call.
+
+## `generate/` prompt-quality review (2026-08-10)
+
+**Caveat up front:** this environment has no Anthropic credentials (no
+`ANTHROPIC_API_KEY`, no `ant` profile — same gap noted when `generate/` was
+first built), so none of this is from watching the real model's output. The
+5-fixture end-to-end test above only proves the pipeline _mechanics_ handle
+all 5 types once _some_ fix is proposed — it can't judge whether Claude's
+actual proposed text is good. What follows is a static read of
+`src/generate/index.ts`'s system prompt and of what context `context/`
+does/doesn't hand it, against each violation type's specific needs. Treat
+it as a prompt-review starting point, not a benchmark result — re-run this
+kind of check for real once credentials are available (`scan --write`
+against `test/fixtures/`, eyeballing each generated `newSnippet`).
+
+**1. `color-contrast` — not a prompt problem, it's not reachable at all.**
+`detect/` disables this rule outright (jsdom has no canvas/paint
+implementation for axe-core to measure against — confirmed empirically:
+even a `#cccccc`-on-`#ffffff` fixture produces zero violations). No amount
+of prompt tuning in `generate/` touches this, because `context/` and
+`generate/` never run for it — `detectViolations` never reports it in the
+first place. Fixing this requires a detection-layer change (a real canvas
+impl via the `canvas` npm package, or moving to a real browser via
+Playwright — see the jsdom limitation noted earlier in this file), not a
+`generate/` change. Flagging it here so it isn't mistaken for a
+`generate/` weakness later.
+
+**2. `label` — the prompt's own scope rule blocks the more idiomatic fix.**
+The system prompt forbids touching anything but the one flagged element
+("Do not touch the parent, the siblings, or anything else in the file").
+For a bare `<input>` with no label, that leaves exactly one fix shape
+available: an `aria-label` (or `aria-labelledby` pointing at an existing
+id) on the input itself. The more idiomatic fix most developers would
+reach for — a real `<label htmlFor="...">` — requires _adding a sibling
+element_, which the current single-element-replacement architecture
+structurally cannot do. This isn't a wording problem in the prompt; it's a
+scope constraint that rules out the better fix for this one rule. Worth
+a decision: either accept `aria-label` as the standing fix for `label`
+(defensible — it satisfies WCAG 4.1.2 same as a real `<label>`), or extend
+`context`/`generate`/`verify` to support adding a sibling node for this
+rule specifically (bigger change, affects the "one element only" guarantee
+the rest of the system leans on).
+
+**3. `image-alt` / `button-name` — quality is bounded by what's actually in
+context, not by prompt wording.** Both need Claude to _know_ what the
+image/button does; the prompt already tells it to use "surrounding
+context" and to avoid generic placeholders. The gap is upstream of
+`generate/`: `context/` hands over sibling/parent JSX text, but not (a) the
+resolved value of a dynamic `src` (e.g. `src={avatarUrl}` — Claude sees the
+prop name, never the image), or (b) the implementation of a named event
+handler (`onClick={handleDelete}` — Claude sees the identifier, never what
+it does). For well-labeled surrounding code (a heading, descriptive prop
+names) this is probably fine; for a bare icon button or dynamically-sourced
+image with no nearby text, no prompt wording fixes a genuine information
+gap. If this turns out to be a real problem in practice, it's a `context/`
+scoping question (resolve simple prop values, inline handler bodies) more
+than a `generate/` prompt one.
+
+**4. `link-name` — the prompt doesn't distinguish "has an accessible name"
+from "is genuinely accessible."** axe-core's `link-name` check (like
+`button-name`) only requires _some_ accessible name — an `aria-label` with
+empty visible text passes it exactly as well as real link text does. But
+an aria-label-only fix is worse in practice: sighted users navigating
+without a screen reader see nothing, and it doesn't help SEO or
+browser-chrome link lists. The current prompt has no preference between
+"add visible text" and "add aria-label" for elements where visible text is
+the norm (links, buttons with visible labels elsewhere in the UI). This
+is a concrete, cheap prompt-tightening candidate: for `link-name` (and
+arguably `button-name` when the button isn't icon-only), prefer adding
+real child text over `aria-label` when the fix allows it.
+
+**5. `landmark-unique` — different failure shape than the other four, and
+the prompt doesn't say so.** This is the only one of the 5 that's
+_relational_: the violation exists because of a pair of elements (two
+landmarks with colliding implicit names), not because of anything wrong
+with the flagged element in isolation. Confirmed empirically that
+uniquely labeling _only_ the flagged element (leaving its sibling landmark
+untouched) is sufficient to resolve it — so the single-element-fix
+architecture does work here, and `context/` already includes the sibling
+landmark in its context block, which should let Claude pick a
+non-colliding label. But the prompt never says anything like "you don't
+need the sibling to also change" — for a violation that's inherently about
+a _pair_, an unguided model could plausibly try to produce a fix that
+assumes both landmarks change together, which the architecture doesn't
+support. A one-line addition covering relational rules would remove that
+ambiguity rather than leaving it to be inferred.
+
+**If tightening the prompt from these findings:** items 2 and 5 are the
+sharpest (structural, not just wording) and worth prioritizing; item 4 is
+a small, low-risk addition; item 3 needs a `context/` change more than a
+`generate/` one; item 1 isn't a `generate/` issue at all. None of this has
+been applied to `SYSTEM_PROMPT` yet — reported for a decision, not acted
+on unprompted.
