@@ -43,18 +43,33 @@ function countOccurrences(haystack: string, needle: string): number {
   return count;
 }
 
+/**
+ * Replaces `patch.oldSnippet` with `patch.newSnippet` in `source`, requiring
+ * exactly one occurrence — refusing to guess which one to touch rather than
+ * silently patching the wrong element. Shared by `verifyFix` (in memory)
+ * and cli/'s `--write` step (applied to a file it then writes to disk).
+ */
+export function applyPatchToSource(source: string, patch: Patch): string {
+  const occurrences = countOccurrences(source, patch.oldSnippet);
+  if (occurrences !== 1) {
+    throw new Error(
+      `Cannot apply patch for violation "${patch.violationId}": expected its oldSnippet to appear exactly once in the source, found ${occurrences}`,
+    );
+  }
+  return source.replace(patch.oldSnippet, patch.newSnippet);
+}
+
 export async function verifyFix(options: VerifyFixOptions): Promise<VerificationResult> {
   const { patch, originalViolation } = options;
   const filePath = path.resolve(patch.filePath);
 
   const originalSource = readFileSync(filePath, 'utf8');
-  const occurrences = countOccurrences(originalSource, patch.oldSnippet);
-  if (occurrences !== 1) {
-    throw new Error(
-      `Cannot apply patch for violation "${patch.violationId}": expected its oldSnippet to appear exactly once in ${filePath}, found ${occurrences}`,
-    );
+  let patchedSource: string;
+  try {
+    patchedSource = applyPatchToSource(originalSource, patch);
+  } catch (error) {
+    throw new Error(`${(error as Error).message} (in ${filePath})`);
   }
-  const patchedSource = originalSource.replace(patch.oldSnippet, patch.newSnippet);
 
   // Sequential, not Promise.all: each render swaps process-wide globals
   // (see detect/'s withJsdomEnvironment) for its duration, so two renders

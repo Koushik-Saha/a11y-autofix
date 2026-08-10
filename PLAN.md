@@ -30,8 +30,10 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
    were introduced. Produces a `VerificationResult` with
    `status: 'verified' | 'unverified'` — an unverified result is returned,
    not discarded, so `cli/` can surface why the patch didn't work.
-5. **cli/** — Wires the above into commands (`scan`, ...), and is the only
-   module responsible for user-facing output and prompts.
+5. **cli/** — Wires the above into a `scan <path>` command: prints each
+   violation plus its fix as a unified diff, applies verified fixes to disk
+   with `--write`, and never auto-applies an unverified one. The only
+   module responsible for user-facing output.
 
 ## Module boundaries
 
@@ -68,9 +70,9 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
 
 ## Status
 
-`detect/`, `context/`, `generate/`, and `verify/` are all implemented.
-`detect/`, `context/`, and `verify/` are tested with vitest; `generate/`
-isn't (see below). `cli/` is still a stub.
+All five modules are implemented, and `npx a11y-autofix` works locally via
+`npm link`. `detect/`, `context/`, `verify/`, and `cli/` are tested with
+vitest; `generate/` isn't (see below).
 
 ### Done
 
@@ -133,14 +135,43 @@ isn't (see below). `cli/` is still a stub.
       per the module-boundaries rule above. Tests: `test/verify.test.ts`
       covers both the verified and unverified paths (plus a patch that
       doesn't apply cleanly, which throws).
+- [x] `cli/`: `scan <path>` runs detect → context → generate → verify per
+      violation and prints a unified diff (`--- a/`/`+++ b/`/`@@ ... @@`
+      hunk, using `context.element.location.startLine` for the header) for
+      every proposed fix, verified or not. `--write` applies a verified
+      fix to disk immediately, re-reading the file fresh each time so
+      multiple fixes to the same file layer correctly; an unverified fix
+      is always printed (with the `remainingViolations`/`newViolations`
+      that explain why) and is never written, `--write` or not — enforced
+      by reusing `verify/`'s new exported `applyPatchToSource` guard (same
+      exactly-one-occurrence check as `verifyFix` itself) rather than a
+      second copy of that logic. Exit code is 1 whenever a violation is
+      still unresolved at the end of the run (everything, in print-only
+      mode; only unverified/errored ones, in `--write` mode). `detect/`'s
+      internal `resolveComponentFiles` is now exported so `cli/` can list a
+      directory's component files and run the per-file pipeline against
+      each one individually (`detectViolations` itself still aggregates a
+      whole directory into one flat list with no per-violation file
+      attribution, which is fine for its own tests but not enough for
+      `cli/`'s needs). `runScan` is exported separately from the
+      `program.parse` call (gated on `require.main === module`) so tests
+      can drive it directly. Tests: `test/cli.test.ts` mocks only
+      `generateFix` (the sole piece needing live Claude credentials) and
+      runs the real detect/context/verify pipeline against scratch fixture
+      copies — covers a verified fix applied with `--write`, an unverified
+      fix left untouched despite `--write`, a verified fix left unwritten
+      without `--write`, and a clean component that never calls
+      `generateFix`. Confirmed working end to end via the real binary:
+      `npm link` + `npx a11y-autofix scan <path>` against both a clean and
+      a violating fixture, and `--version`/`--help` on both the top-level
+      command and `scan`.
 
 ### Not started
 
-- [ ] `cli/`: real `scan` command output (diff rendering, accept/reject
-      prompt), config file support (API key, ignore patterns) — including
-      rendering `VerificationResult.status` to the user, which is the
-      concrete "surface it, don't discard it" consumer of `verify/`'s
-      output.
+- Remaining `cli/` polish, none of it blocking: colored/richer terminal
+  output, a config file for the API key and ignore patterns, and an
+  accept/reject prompt for individual fixes (right now `scan --write`
+  applies every verified fix unconditionally).
 
 ## Open decisions (revisit before implementing)
 
@@ -155,8 +186,14 @@ isn't (see below). `cli/` is still a stub.
   or switching to a real browser via Playwright for higher-fidelity,
   isolated rendering.
 - `verify/` requires `Patch.oldSnippet` to occur exactly once in the
-  current source and throws otherwise (see Done, above) — a component with
-  two structurally-identical offending elements (rare, but possible) needs
-  position-aware replacement instead of a plain string match. `cli/`'s
-  eventual apply-to-disk step will hit the same constraint and should reuse
-  `verify/`'s check rather than re-deriving it.
+  current source and throws otherwise (see Done, above); `cli/`'s
+  `--write` step reuses that same exported check
+  (`applyPatchToSource`). A component with two structurally-identical
+  offending elements (rare, but possible) would still need position-aware
+  replacement instead of a plain string match — not implemented.
+- `detectViolations` still returns one flat, file-unattributed violation
+  list for a directory target (see `cli/`'s Done entry above, which works
+  around this by having `cli/` resolve files itself and call
+  `detectViolations` once per file instead). Worth revisiting if another
+  caller ever needs directory-wide results with per-violation file
+  attribution in one call.

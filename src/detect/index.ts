@@ -49,7 +49,14 @@ function isComponentFile(fileName: string): boolean {
   return true;
 }
 
-function resolveComponentFiles(componentPath: string): string[] {
+/**
+ * Lists the component file(s) at `componentPath` — itself if it's a file,
+ * or every non-test `.tsx`/`.jsx` file directly inside it if it's a
+ * directory (non-recursive). Exported so cli/ can resolve a scan target
+ * into individual files and run the full per-violation pipeline (which
+ * needs a specific file, not a directory) against each one.
+ */
+export function resolveComponentFiles(componentPath: string): string[] {
   const stats = statSync(componentPath);
   if (stats.isFile()) {
     return [componentPath];
