@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { detectViolations } from '../src/detect';
+import { detectViolations, resolveComponentFiles } from '../src/detect';
 
 const fixture = (name: string) => path.join(__dirname, 'fixtures', name);
 
@@ -37,5 +37,34 @@ describe('detectViolations', () => {
     const ids = new Set(result.violations.map((v) => v.id));
     expect(ids.has('image-alt')).toBe(true);
     expect(ids.has('label')).toBe(true);
+  });
+
+  it('flags an <img> missing alt text in a Vue SFC', async () => {
+    const result = await detectViolations({ componentPath: fixture('VueMissingAlt.vue') });
+
+    const violation = result.violations.find((v) => v.id === 'image-alt');
+    expect(violation).toBeDefined();
+    expect(violation?.nodes[0]?.html).toContain('<img');
+    expect(violation?.nodes[0]?.target).toEqual(['img']);
+  });
+
+  it('flags a Vue form input missing an associated label', async () => {
+    const result = await detectViolations({ componentPath: fixture('VueMissingLabel.vue') });
+
+    const violation = result.violations.find((v) => v.id === 'label');
+    expect(violation).toBeDefined();
+    expect(violation?.nodes[0]?.html).toContain('<input');
+  });
+
+  it('reports no violations for an accessible Vue component', async () => {
+    const result = await detectViolations({ componentPath: fixture('VueAccessibleCard.vue') });
+
+    expect(result.violations).toEqual([]);
+  });
+
+  it('discovers .vue files alongside .tsx/.jsx ones when scanning a directory', () => {
+    const files = resolveComponentFiles(path.join(__dirname, 'fixtures'));
+    expect(files.some((f) => f.endsWith('.vue'))).toBe(true);
+    expect(files.some((f) => f.endsWith('.tsx'))).toBe(true);
   });
 });

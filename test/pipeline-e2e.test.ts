@@ -61,9 +61,72 @@ const cases: Case[] = [
     violationId: 'landmark-unique',
     buildFix: (old) => old.replace('<nav>', '<nav aria-label="Primary">'),
   },
+  {
+    label: 'ARIA attribute values (aria-valid-attr-value)',
+    fixtureName: 'InvalidAriaAttributeValue.tsx',
+    violationId: 'aria-valid-attr-value',
+    buildFix: (old) => old.replace('aria-checked="maybe"', 'aria-checked="false"'),
+  },
+  {
+    label: 'ARIA widget accessible names (aria-input-field-name)',
+    fixtureName: 'MissingAriaWidgetName.tsx',
+    violationId: 'aria-input-field-name',
+    buildFix: (old) => old.replace('role="textbox"', 'role="textbox" aria-label="Comment"'),
+  },
+  {
+    label: 'frame titles (frame-title)',
+    fixtureName: 'MissingFrameTitle.tsx',
+    violationId: 'frame-title',
+    buildFix: (old) => old.replace('<iframe ', '<iframe title="Map of our headquarters" '),
+  },
+  {
+    label: 'input button names (input-button-name)',
+    fixtureName: 'MissingInputButtonName.tsx',
+    violationId: 'input-button-name',
+    buildFix: (old) => old.replace('<input type="button"', '<input type="button" value="Submit"'),
+  },
+  {
+    label: 'positive tabindex (tabindex)',
+    fixtureName: 'PositiveTabIndex.tsx',
+    violationId: 'tabindex',
+    buildFix: (old) => old.replace('tabIndex={3}', 'tabIndex={0}'),
+  },
+  {
+    label: 'Vue: alt text (image-alt)',
+    fixtureName: 'VueMissingAlt.vue',
+    violationId: 'image-alt',
+    buildFix: () =>
+      '<img src="https://example.com/photo.jpg" alt="A scenic photo in the gallery" />',
+  },
+  {
+    label: 'Vue: form labels (label)',
+    fixtureName: 'VueMissingLabel.vue',
+    violationId: 'label',
+    buildFix: () => '<input type="text" name="email" aria-label="Email address" />',
+  },
+  {
+    label: 'Vue: button names (button-name)',
+    fixtureName: 'VueMissingButtonName.vue',
+    violationId: 'button-name',
+    buildFix: (old) =>
+      old.replace('<button @click="() => {}">', '<button @click="() => {}" aria-label="Close">'),
+  },
+  {
+    label: 'Vue: link names (link-name)',
+    fixtureName: 'VueMissingLinkName.vue',
+    violationId: 'link-name',
+    buildFix: () =>
+      '<a href="/articles/wcag-2026-update">Read more: New accessibility guidelines released</a>',
+  },
+  {
+    label: 'Vue: landmark roles (landmark-unique)',
+    fixtureName: 'VueDuplicateLandmarks.vue',
+    violationId: 'landmark-unique',
+    buildFix: (old) => old.replace('<nav>', '<nav aria-label="Primary">'),
+  },
 ];
 
-describe('pipeline end-to-end across the 5 target violation types', () => {
+describe('pipeline end-to-end across the 10 target violation types, in both React and Vue', () => {
   it.each(cases)(
     'detects and verifies a fix for $label',
     async ({ fixtureName, violationId, buildFix }) => {

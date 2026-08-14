@@ -1,9 +1,9 @@
 # a11y-autofix — Plan
 
-An open-source npm CLI that scans React components with axe-core, generates
-verified WCAG fix diffs using the Claude API, and re-runs axe-core to confirm
-each fix before showing it to the user. No fix is surfaced unless it has been
-proven to actually resolve the violation.
+An open-source npm CLI that scans React and Vue components with axe-core,
+generates verified WCAG fix diffs using the Claude API, and re-runs axe-core
+to confirm each fix before showing it to the user. No fix is surfaced unless
+it has been proven to actually resolve the violation.
 
 ## Pipeline
 
@@ -14,8 +14,8 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
    +----------------------- re-run axe-core against the patched component -----+
 ```
 
-1. **detect/** — Renders the target React component(s) and runs axe-core
-   against them. Produces `AxeViolation[]`.
+1. **detect/** — Renders the target component(s) (React or Vue) and runs
+   axe-core against them. Produces `AxeViolation[]`.
 2. **context/** — For a given violation, gathers the source code and any
    related project context (surrounding files, conventions) needed to
    reason about a fix. Produces `FixContext`.
@@ -44,7 +44,19 @@ from 'a11y-autofix'`) call into it.
 
 - `detect/` and `verify/` share the same axe-core execution path — `verify/`
   calls back into `detect/` rather than duplicating axe invocation logic.
-- `context/` depends only on `detect/`'s types (an `AxeViolation`).
+  `detect/` itself is split into a framework-agnostic `index.ts` and a
+  `RenderAdapter` boundary in `detect/adapters/` (added 2026-08-11, see the
+  "Vue support" Done entry below) — nothing outside `detect/adapters/` may
+  import `@vue/compiler-sfc`/`vue` (or, later, a Svelte compiler) directly.
+- `context/` depends only on `detect/`'s types (an `AxeViolation`). Since
+  2026-08-10, `context/` itself is split into a framework-agnostic
+  `index.ts` and a `FrameworkAdapter` boundary in `context/adapters/` — see
+  the "Framework adapter refactor" Done entry below. Nothing outside
+  `context/adapters/` may import `ts-morph` (or, later, a Svelte parser)
+  directly. `context/adapters/`'s `FrameworkAdapter` (locate-and-describe)
+  and `detect/adapters/`'s `RenderAdapter` (compile-and-mount) are
+  deliberately two separate interfaces, not one shared one — see the Vue
+  support entry for why.
 - `generate/` depends only on `context/`'s types (a `FixContext`) and is the
   only module that talks to the Claude API.
 - `scan.ts` is the sole consumer of all four pipeline modules and contains
@@ -68,13 +80,17 @@ from 'a11y-autofix'`) call into it.
 - **Lint/format**: ESLint 9 flat config (`typescript-eslint`) + Prettier,
   with `eslint-config-prettier` disabling stylistic overlap.
 - **Dev loop**: `tsx` for running the CLI from source without a build step.
-- **Headless rendering**: `jsdom` + `@testing-library/react`, with target
-  component files compiled on the fly via `esbuild` (bundled, JSX-transformed
-  CJS) so `detect/` can `require` arbitrary `.tsx`/`.jsx` files without the
-  caller needing a build step.
+- **Headless rendering**: `jsdom` + `@testing-library/react` for React,
+  `jsdom` + Vue's own `createApp().mount()` for Vue, with target component
+  files compiled on the fly (`esbuild`, bundled CJS — JSX-transformed for
+  React; script+template compiled via `@vue/compiler-sfc` then bundled for
+  Vue) so `detect/` can render arbitrary `.tsx`/`.jsx`/`.vue` files without
+  the caller needing a build step of their own.
 - **Tests**: `vitest`.
-- **Source parsing**: `ts-morph`, for locating and extracting JSX/TypeScript
-  AST nodes in `context/`.
+- **Source parsing**: `ts-morph` for locating and extracting JSX/TypeScript
+  AST nodes (React) and for a second pass over a Vue `<script setup>`
+  block's `defineProps<T>()` type argument; `@vue/compiler-sfc` for
+  locating elements in a Vue template's own AST.
 - **Structured output**: `zod` + `@anthropic-ai/sdk`'s `messages.parse()` /
   `zodOutputFormat()` in `generate/`, to constrain the model's response to
   a single typed field rather than parsing free text.
@@ -234,6 +250,491 @@ vitest; `generate/` isn't (see below).
       empty, `newViolations` empty) a fix must clear to be marked
       `verified`, with a pointer to the tests that assert both outcomes.
 
+- [x] 5 more violation types, per the WebAIM Million cross-reference below
+      (2026-08-10): `detect/`, `context/`, and `generate/` needed **no
+      code changes** — all three are already rule-agnostic (`detect/` runs
+      axe-core's full default rule set, `context/` locates any single JSX
+      element by selector structure, `generate/`'s prompt is generic). This
+      round was purely fixtures + tests, exactly like the first 5. Two of
+      the originally-recommended 5 (duplicate IDs, bypass/skip-links) were
+      dropped after empirical probing — not guessed — against raw
+      axe-core: `duplicate-id`/`duplicate-id-active` are `enabled: false`
+      by default in the installed axe-core version (deprecated), and
+      `duplicate-id-aria` (the one enabled variant) didn't fire even
+      against a realistic duplicate-id-referenced-by-`aria-labelledby`
+      case, tested both through this pipeline and directly against raw
+      axe-core with no React/esbuild involved. `bypass` is a whole-page
+      check ("Page must have means to bypass repeated blocks"), not a
+      per-element one, and doesn't fire at all when scanning a single
+      rendered component with no landmarks — confirms the document-root
+      scope mismatch already flagged below, and rules out even the
+      narrower "repair a broken skip-link target" framing floated below,
+      since `bypass` doesn't validate `href` targets at all. Substituted
+      `input-button-name` and `tabindex` instead (user-approved after
+      being shown the probe results) — both confirmed firing cleanly and
+      in isolation before fixtures were written. Added fixtures
+      `InvalidAriaAttributeValue.tsx` (`aria-valid-attr-value` — invalid
+      `aria-checked` enum value), `MissingAriaWidgetName.tsx`
+      (`aria-input-field-name` — a `role="textbox"` custom widget with no
+      accessible name), `MissingFrameTitle.tsx` (`frame-title`),
+      `MissingInputButtonName.tsx` (`input-button-name`), and
+      `PositiveTabIndex.tsx` (`tabindex`). Each was verified via a probe
+      script to trigger exactly its one target rule and nothing else
+      before being wired into a test — several naive candidates (e.g. a
+      bare `<div role="switch">`) fire two rules at once
+      (`aria-required-attr` + `aria-toggle-field-name`) and had to be
+      adjusted (giving it an `aria-label`) to isolate the one under test,
+      same discipline the first 5 fixtures already followed.
+      `test/pipeline-e2e.test.ts`'s `cases` table now covers all 10 types
+      end to end (`generateFix` mocked with a hand-authored ideal fix per
+      type, same as before); typecheck/lint/full suite (31 tests, 6 files)
+      all pass.
+
+- [x] Framework adapter refactor (2026-08-10): split `context/` into a
+      framework-agnostic `index.ts` and a new `context/adapters/` boundary,
+      so a future Vue/Svelte adapter can be added without touching
+      `detect/`, `generate/`, `verify/`, or `context/index.ts` itself.
+      `context/adapters/types.ts` defines the `FrameworkAdapter` interface
+      (`id`, `supports(componentPath)`, `gatherElementContext(options)` →
+      `FrameworkElementContext`) plus `JsxElementSnapshot`/
+      `JsxSourceLocation`, which move there unchanged (kept their names,
+      "Jsx" prefix and all, to avoid an unrequested public-API rename —
+      `src/index.ts` still re-exports them from `context/`, so this isn't a
+      breaking change for library consumers). `context/adapters/react.ts`
+      is a verbatim move of every ts-morph-specific function that used to
+      live in `context/index.ts` (`locateJsxElement`, `extractPropTypes`,
+      the attribute tie-breaker, etc.) behind a single `reactAdapter`
+      object. `context/index.ts` now does nothing framework-specific: it
+      resolves the component path, picks the first adapter in an `ADAPTERS`
+      array whose `supports()` accepts the file extension (today just
+      `reactAdapter`), calls `gatherElementContext`, and assembles the
+      result into a `FixContext` — same public `gatherContext` signature
+      and behavior as before. Deliberately did **not** touch `detect/`'s
+      rendering pipeline (esbuild JSX transform + `@testing-library/react` + the `typeof candidate !== 'function'` component check) even though
+      it's equally React-specific — the user scoped this refactor to
+      `context/` only. That means today's `FrameworkAdapter` only solves
+      "locate an element and describe it" for a new framework; actually
+      running a Vue/Svelte component through `detect/` to produce
+      violations in the first place would need its own adapter-style split
+      there first (different rendering/mounting per framework), which is
+      unstarted and not implied by this refactor. No behavior changed:
+      `gatherContext`'s call signature, `FixContext`'s shape, and every
+      error message are identical to before. Confirmed via the full
+      existing suite (all 31 tests, including all 3 `context.test.ts`
+      cases and all 11 `pipeline-e2e.test.ts` cases) passing unmodified,
+      plus a clean `typecheck`/`lint`/`format:check`/`build`.
+
+- [x] Vue support, end to end (2026-08-11): both halves of what the
+      framework-adapter refactor above left unstarted are now implemented —
+      `context/`'s `FrameworkAdapter` for locating elements, and a new,
+      separate `RenderAdapter` split in `detect/` for actually rendering a
+      component and producing violations in the first place. `scan()` now
+      works on `.vue` files exactly as it does on `.tsx`/`.jsx`, with no
+      changes to `generate/`, `verify/`, or `scan.ts` — confirmed via the
+      compiled CLI binary against a `.vue` fixture, which correctly detects
+      the violation and only fails at Claude credential resolution (no API
+      key in this environment), the same proof-of-integration standard used
+      for `generate/` itself. **Parser choice, researched and confirmed
+      before implementing:** compared `vue-eslint-parser` (what
+      `eslint-plugin-vuejs-accessibility` is built on) against
+      `@vue/compiler-sfc` (the official compiler package Vue tooling itself
+      is built on) by actually installing both and parsing sample SFCs, not
+      going by docs. `vue-eslint-parser@10.4.1` requires `eslint` as a peer
+      and pulls in `espree`/`eslint-visitor-keys` versions that declare
+      `engines: node ^20.19.0 || ^22.13.0 || >=24` — a real conflict with
+      this project's `engines: ">=18"` claim and its Node 18.x CI leg, not a
+      theoretical one. `@vue/compiler-sfc` has no such constraint and its
+      `descriptor.template.ast` gives the same shape ts-morph gives for JSX
+      (tag, children, attributes, `loc.{line,column,offset}`), so it was the
+      clear choice. User confirmed via AskUserQuestion before any code was
+      written. **`context/adapters/vue.ts`** (`FrameworkAdapter`): parses
+      with `@vue/compiler-sfc`'s `parse()`, walks `descriptor.template.ast`
+      (a `RootNode`/`ElementNode` tree from `@vue/compiler-core`) to locate
+      the violating element using the same algorithm as `react.ts` — tag
+      name + nth-child + parent tag, with axe's raw HTML attributes as a
+      tie-breaker. `parseSelector`/`parseHtmlAttributes` were extracted out
+      of `react.ts` into a new shared `context/adapters/axe-selector.ts`,
+      since that logic parses axe's own selector/HTML output format and has
+      nothing to do with either framework — both adapters now import it
+      instead of duplicating it (react.ts keeps its own JSX-specific
+      `class`→`className`/`for`→`htmlFor` attribute-name translation
+      locally, since Vue templates use the plain HTML names). Prop-type
+      extraction targets `<script setup>`'s `defineProps<Props>()` call
+      specifically: the script block's text is parsed as a second,
+      in-memory ts-morph source file (`useInMemoryFileSystem: true`), then
+      the same resolve-a-same-file-interface-or-type-alias logic `react.ts`
+      already had is reused. Deliberately out of scope, matching the same
+      "cover the common case, not every case" discipline the React adapter
+      already uses for its own prop-type extraction: Options API
+      (`props: {...}`) components aren't specially handled, and elements
+      inside `v-if`/`v-for`/`v-else` branches aren't walked into (those are
+      separate AST node types the tree-walk doesn't recurse into) — both
+      confirmed as real gaps, not typos, and left for later since none of
+      the fixtures need them. **`detect/adapters/vue.ts`** (`RenderAdapter`,
+      a new interface — see the module-boundaries note above for why it's
+      not the same interface as `context/`'s): compiles the SFC's script and
+      template separately via `@vue/compiler-sfc`'s
+      `compileScript`/`compileTemplate` (mirroring what
+      `vue-loader`/`@vitejs/plugin-vue` do at build time), stitches them
+      into one CommonJS module's source text by hand (`const __sfc__ =
+<compiled script>; __sfc__.render = <compiled template>;
+module.exports = __sfc__;`), bundles that with esbuild exactly like
+      `react.ts` does, then mounts it with Vue's own `createApp().mount()`.
+      The `export default ...` replace had to be a regex
+      (`/export default\s*/`), not a literal string match: a plain
+      `<script setup>` compiles to `export default { ... }`, but adding
+      `defineProps<Props>()` with a TS type argument changes the shape to
+      `export default /*@__PURE__*/_defineComponent({ ... })` — caught by
+      testing against `VueTypedMissingAlt.vue` specifically, not assumed.
+      **Real bug found and fixed, not just theorized:** the first working
+      version threw `Cannot read properties of null (reading
+'createElement')` on every render. Root cause, traced to
+      `node_modules/@vue/runtime-dom/dist/runtime-dom.cjs.js`: `const doc =
+typeof document !== "undefined" ? document : null;` at module scope —
+      evaluated once, the first time `vue` is `require`d anywhere in the
+      process. Since `detect/adapters/vue.ts` was originally a normal
+      top-level `import { createApp } from 'vue'`, that first require
+      happened at process start, before `withJsdomEnvironment` had ever set
+      up a jsdom `document` global — permanently baking in `doc = null` for
+      the rest of the process. (React doesn't have this problem:
+      `@testing-library/react`'s `render()` looks up `document` dynamically
+      at call time rather than caching it at import time.) Fixed by never
+      statically importing `vue`: `requireFreshVue()` deletes every
+      `vue`/`@vue/*` entry from `require.cache` and re-requires `vue` fresh
+      on every render call, from inside `withJsdomEnvironment`, so
+      `runtime-dom`'s cached `doc` always reflects the jsdom instance
+      created for that specific call rather than a stale or nonexistent
+      one. Same bundle-Vue-in tradeoff as the existing React/duplicate-React
+      note in Open Decisions below applies here too (documented there, not
+      solved). Separately, Vue's dev-mode "missing required prop" warning
+      fires on every scan of a typed component (nothing passes real props
+      when scanning in isolation — same as React) and is suppressed via
+      `app.config.warnHandler` rather than left to spam scan output.
+      **Fixtures**: `VueMissingAlt.vue` (`image-alt`), `VueMissingLabel.vue`
+      (`label`), `VueMissingButtonName.vue` (`button-name`),
+      `VueMissingLinkName.vue` (`link-name`), `VueDuplicateLandmarks.vue`
+      (`landmark-unique`), `VueTypedMissingAlt.vue` (`<script setup
+lang="ts">` + `defineProps<T>()`, for prop-type extraction), and
+      `VueAccessibleCard.vue` (a clean control) — each verified via a probe
+      script to trigger exactly its one target rule (or zero, for the clean
+      one) before being wired into a test, same discipline as every
+      previous fixture round. `detect/`'s directory-scan `isComponentFile`
+      now checks every registered adapter's `supports()` rather than a
+      hardcoded extension set, so `.vue` files are picked up automatically
+      alongside `.tsx`/`.jsx` in the same directory scan. **Tests**:
+      `test/detect.test.ts` gained Vue-specific cases (missing alt, missing
+      label, clean component, directory scan discovering `.vue` alongside
+      `.tsx`) plus `resolveComponentFiles` now being exercised directly
+      rather than only through `detectViolations`. `test/context.test.ts`
+      gained 3 Vue cases (element/parent/siblings mapping, a
+      landmark-unique relational case, and the `defineProps<T>()` prop-type
+      case). `test/pipeline-e2e.test.ts`'s `cases` table gained the 5 core
+      Vue types (image-alt, label, button-name, link-name,
+      landmark-unique) run through the real detect → context → verify
+      pipeline with hand-authored ideal fixes (`generateFix` mocked, same
+      as every other entry in that table) — full suite is now 43 tests
+      across 6 files, all passing, plus clean
+      `typecheck`/`lint`/`format:check`/`build`. **Dependencies added**:
+      `vue`, `@vue/compiler-sfc`, `@vue/compiler-core` (all pinned to
+      `^3.5.41`, the versions actually tested against) as regular
+      `dependencies` — same "bundled, not peer" precedent as
+      `react`/`react-dom`. `package.json`'s `description` and `keywords`
+      updated to mention Vue. `npm pack --dry-run` re-checked: tarball
+      still contains only `dist/`, `LICENSE`, `README.md`, `package.json`
+      — the new adapter directories compile into `dist/context/adapters/`
+      and `dist/detect/adapters/` as expected, nothing extra leaks in.
+      **What's still not covered**: Svelte (structurally ready for via the
+      same two adapter interfaces, not started); Vue Options API
+      components; and elements inside `v-if`/`v-for`/`v-else`.
+      `README.md`'s headline and pipeline-stage descriptions were updated
+      to mention Vue alongside React; its "How the verify loop works"
+      section's remaining JSX-specific wording (`generate`'s "replacement
+      JSX" phrasing, etc.) wasn't audited line-by-line beyond the two spots
+      that were flatly wrong.
+
+- [x] GitHub Action (2026-08-11): `action.yml` at the repo root wraps the
+      CLI end to end — build the local package into a tarball, install it
+      into the consumer's workspace, run `a11y-autofix scan --json`, then
+      post the results on the PR. Researched GitHub's current
+      suggested-changes API before writing any code (see below), rather
+      than assuming the old `position`-based comment format still applied.
+      Added a `--json` flag to `cli/`'s `scan` command first (`runScan`
+      now takes a `CliScanOptions` extending `ScanOptions` with `json?:
+boolean`; `summarize`/`printScanResult` split apart so both the
+      human and JSON paths share the same summary computation) — the CLI
+      had no machine-readable output before this, so "wraps the existing
+      CLI" needed that gap closed first, not worked around by having the
+      Action import the library API instead. New `test/cli.test.ts` case
+      spies on `console.log` and asserts the full `ScanResult` shape comes
+      through unchanged. **API research:** confirmed via GitHub's current
+      REST docs that inline suggestions are posted through `POST
+/repos/{owner}/{repo}/pulls/{pull_number}/reviews`, with each
+      comment's body containing a fenced ` ```suggestion ` block, and
+      anchored via `path` + `line`/`side` (single-line) or additionally
+      `start_line`/`start_side` (multi-line) — not the older
+      diff-`position` field, which the docs still accept but no longer
+      lead with. The single fact that shaped the whole design: a review
+      comment can only anchor to a line the PR's diff actually shows —
+      GitHub's API rejects one anchored elsewhere. That's why a "verified"
+      fix isn't sufficient on its own to become an inline suggestion; it
+      also has to fall inside the diff, which most of the code below
+      exists to determine. **`action/lib/diff.js`** (`parseCommentableLines`):
+      parses the unified-diff `patch` text GitHub's pulls-files API
+      returns per changed file into the set of new-file line numbers
+      actually visible in the diff (added lines plus their surrounding
+      hunk context — lines outside every `@@` hunk were never touched by
+      the PR and can't be commented on). `isRangeCommentable` requires
+      every line in an element's `[startLine, endLine]` to be in that
+      set, not just one end of it. **`action/lib/bucket.js`**
+      (`bucketViolations`): the confidence gate. "High confidence" = both
+      `status === 'verified'` (axe-core re-confirmed the fix) AND the
+      location is in the diff (`isRangeCommentable`) — only that
+      combination becomes an inline suggestion. Everything else
+      (unverified, errored, or verified but outside the diff) goes to the
+      summary bucket, tagged with why it isn't inline, so a
+      genuinely-verified fix outside the diff is never confused with an
+      unverified one in the summary comment's messaging.
+      **`action/lib/suggestion.js`** (`buildSuggestionBody`): a GitHub
+      suggestion replaces the entire line range it's anchored to, not
+      just the substring that changed — so if `oldSnippet` is only part
+      of a line (a JSX element inline next to other content), pasting
+      `patch.newSnippet` straight into the block would silently drop
+      everything else on that line. This applies the patch to the full
+      file text first (the same replace-exactly-once logic as
+      `src/verify/index.ts`'s `applyPatchToSource`, deliberately
+      duplicated rather than imported — see below), then slices out the
+      now-fixed line range. Tested explicitly against the
+      shares-a-line-with-other-JSX case, not just the common
+      single-element-per-line case. **`action/lib/render.js`**: pure
+      markdown builders for the inline suggestion comment body and the
+      sticky summary comment (marked with a `<!-- a11y-autofix-summary
+-->` HTML comment so re-runs find and update the same comment
+      instead of spamming a new one per push). **`action/lib/github.js`**
+      (`createClient`): a ~70-line REST client using Node's built-in
+      `fetch` (stable since Node 18, this package's own `engines` floor)
+      — no `@octokit/rest` dependency for the six calls this needs.
+      Handles pagination by fetching pages until one comes back short of
+      `per_page`. **`action/post-results.js`**: the orchestration script
+      `action.yml` invokes. Fetches the PR's changed files, buckets every
+      violation, posts one review covering all inline suggestions
+      (skipped entirely if there are none) plus the upserted summary
+      comment. A genuine bug was found and fixed here via an integration
+      test, not just unit tests of the pure pieces: computing each
+      violation's path relative to `process.cwd()` without normalizing
+      symlinks first (`entry.filePath` comes from detect/context's plain
+      `path.resolve()`, which never follows symlinks, while
+      `process.cwd()` can already be symlink-resolved — e.g. a macOS temp
+      dir under `/tmp` resolving to `/private/tmp`) silently routed every
+      violation to the summary bucket, since the textual relative-path
+      comparison never matched. Fixed by `realpathSync`-normalizing both
+      sides before comparing. `action/post-results.test.js` reproduces
+      this with a real temp directory and a stubbed `fetch`, covering: an
+      in-diff verified fix becoming an inline suggestion, an unverified
+      one going to the summary, updating an existing sticky comment
+      instead of duplicating it, and skipping entirely on a
+      non-`pull_request` event. **`action/check-unresolved.js`**: backs
+      the optional `fail-on-unresolved` input. Deliberately defines
+      "unresolved" as `status !== 'verified'` (unverified or errored), not
+      "not written to disk" — a verified fix sitting on the PR as an
+      acceptable suggestion isn't a failure state for this workflow,
+      that's the intended way to resolve it; gating CI red on "nobody
+      clicked accept yet" would be needless friction for exactly the
+      fixes this Action is most confident in. **`action.yml`**: composite
+      action, not Docker — builds the local package from source (`npm ci
+&& npm run build && npm pack`) rather than installing the
+      last-published npm version, since `--json` is brand new and hasn't
+      been published yet; installs the resulting tarball into the
+      consumer's workspace (needed so `detect/`'s esbuild bundling
+      resolves the consumer's React/Vue copy, not the action's own — same
+      reasoning as the existing duplicate-React Open Decision). The scan
+      step alone gets `continue-on-error: true` — its non-zero exit code
+      on unresolved violations is an expected outcome, not an
+      infrastructure failure, and posting still needs to run afterward.
+      Supports both `pull_request` and `pull_request_target` triggers;
+      `README.md`'s new "GitHub Action" section notes the standard
+      fork-PR security caveats for the latter belong to the consumer's
+      own workflow, not something this Action changes. Tests: 6 new files
+      under `action/` (`diff`, `bucket`, `suggestion`, `render`, plus the
+      `post-results`/`check-unresolved` integration tests), 29 tests
+      total, all pure-JS (no build step needed to test or run this
+      directory — deliberately not TypeScript, so the Action has no
+      dependency on `src/`'s compile step; see the suggestion.js
+      duplication note above for the one place that tradeoff shows up).
+      `eslint.config.js` gained an `action/**/*.js` block (Node globals,
+      `@typescript-eslint/no-require-imports` off) mirroring the existing
+      `*.config.js` one. Full suite (existing + new) passing, plus a real
+      end-to-end smoke test: the actual compiled CLI's `--json` output
+      piped through the actual `post-results.js` against a stubbed
+      `fetch`, not just synthetic fixtures.
+
+- [x] Patch confidence + one retry (2026-08-12): `scan()` no longer gives
+      up after a single failed verification. `scan.ts`'s new
+      `resolveViolation` generates a fix, verifies it, and — only if that
+      first attempt doesn't verify — retries exactly once, feeding the
+      failure back to the model via `generate/`'s new `PreviousAttempt`
+      (the rejected `newSnippet` plus `remainingViolations`/
+      `newViolations` from `verifyFix`) so the retry has an actual reason
+      to produce something different rather than being asked the same
+      question twice. `confidence: 'high' | 'medium' | 'low'` records
+      which attempt (if either) worked: `'high'` for a first-attempt pass,
+      `'medium'` for a fix that needed the retry, `'low'` when both
+      attempts failed (`status` stays `'unverified'`, same manual-review
+      fallback as before this existed — the retry only ever changes
+      `confidence`, never what counts as verified). Confidence can only be
+      known after a fix is verified (or not), which by definition
+      `generateFix()` alone never knows — a bare call to it produces one
+      attempt, not a resolution — so it's not a field on `generate/`'s
+      `Patch` type; scan.ts defines a new `ScoredPatch extends Patch`
+      (`patch: ScoredPatch` on `ScanViolationFixed`) rather than forcing
+      `generateFix()` to fabricate a meaningless confidence value on every
+      call, including the ones library consumers make directly without
+      ever going through `scan()`. The retry reuses the same `context` —
+      re-gathering it would be redundant work, since the violation and
+      source file haven't changed between attempts, only the prompt. Real
+      cost implication, not hidden: any violation unresolved on the first
+      try now costs a second Claude API call plus a second verify render,
+      roughly doubling worst-case per-violation cost — worth knowing
+      before scanning a large codebase for the first time. Surfaced
+      everywhere a `Patch` already was: the CLI's `--json` output needed
+      no code change at all (it already serializes the full `ScanResult`,
+      and `ScoredPatch` just has one more field); the human-readable
+      `printVerificationOutcome` now appends `(confidence: high/medium/
+low)` to the verified/unverified line. The GitHub Action's
+      `action/lib/bucket.js` gained a third condition alongside `status
+=== 'verified'` and "inside the diff": `patch.confidence ===
+'high'`, with a new `'verified-not-high-confidence'` reason for
+      anything that's genuinely verified but only got there via retry —
+      `action/lib/render.js`'s summary entry for that reason includes a
+      diff-fenced code block of the actual fix so a human can review and
+      apply it with `--write` themselves, and the inline suggestion body
+      for a true high-confidence fix now says "(high confidence)"
+      explicitly rather than leaving the trust basis implicit. Tests:
+      `scan.test.ts` gained a dedicated medium-confidence case (two
+      chained `mockImplementationOnce` calls, asserting the retry call
+      actually received the first attempt's `previousAttempt`) plus
+      confidence/call-count assertions on the existing high- and
+      low-confidence cases, including confirming a _thrown_ `generateFix`
+      error does not trigger a retry (only a failed verification does).
+      `action/lib/bucket.test.js` and `action/lib/render.test.js` each
+      gained a medium-confidence case. Full suite: 77 tests across 12
+      files, all passing. **Pre-existing flakiness found while verifying,
+      investigated but not
+      resolved — not part of this feature and not caused by it:** the full
+      suite (run repeatedly, both with and without this session's changes
+      applied) intermittently fails 3–4 `detect.test.ts` Vue cases with
+      `axe.run arguments are invalid`, plus an occasional directory-scan
+      timeout. Initially looked file-concurrency-related — `detect/`'s
+      `withJsdomEnvironment` mutates process-wide globals for the
+      duration of each render, and axe-core is a module-level singleton —
+      so a root `vitest.config.ts` with `fileParallelism: false` was added
+      as a mitigation. That turned out to be wrong: further testing showed
+      `detect.test.ts` fails intermittently even _alone_, with no other
+      file involved, both with and without that config — the same 8-test
+      file passed 8/8 in one run and failed 4/8 in the next, no code
+      changed in between. A stronger attempt (`pool: 'threads'` +
+      `poolOptions.threads.singleThread: true`) made things strictly
+      worse — it runs tests inside a real `worker_threads` worker, where
+      `process.chdir()` (used by `action/post-results.test.js`) throws
+      unconditionally, breaking 3 previously-passing tests outright. Both
+      the config file and that second attempt were reverted; this repo
+      currently ships no `vitest.config.ts` at all, i.e. plain vitest
+      defaults, same as before this was investigated. What's established:
+      it's real (not a one-off), it's confined to `detect.test.ts`
+      specifically (`test/pipeline-e2e.test.ts` exercises the same Vue
+      render path far more times per run and has never failed), and it
+      predates this session (nothing here touches `detect/`,
+      `test/detect.test.ts`, or the Vue adapters). What's not established:
+      the actual mechanism — a leading theory is jsdom's per-instance class
+      identity (`new JSDOM()` gives each call a fresh `Element`/`Node`
+      constructor set) tripping an `instanceof`-style check somewhere in
+      axe-core's `normalizeRunParams`, but that's a
+      hypothesis, not a confirmed root cause. Left as a known, reproducible
+      issue for follow-up investigation rather than a false "fixed" entry
+      — see Not started below.
+
+- [x] `--interactive` / `--log-corrections` (2026-08-13): confirmed the
+      privacy framing before writing any code, as asked, rather than after
+      — grepped the whole codebase first and found zero existing
+      telemetry/network code outside the Claude API calls `generate/`
+      already makes and the GitHub Action's already-opt-in PR-posting;
+      designed `--log-corrections` as explicit-flag-only (no persistent
+      config, no env var) so it can never be silently on; and, since
+      "nothing sent anywhere" is true of this package's own code but not
+      automatically true once a file sits in the user's project directory
+      (an ordinary `git add .` could commit and push it), added a concrete
+      technical mitigation beyond documentation: `.a11y-autofix/` writes
+      its own `.gitignore` containing `*` the first time it's created, so
+      the log is excluded from git regardless of the user's own
+      `.gitignore` state. Building `--log-corrections` required building
+      `--interactive` first — the CLI had no accept/reject/edit prompt at
+      all before this (`--write` applied every verified fix
+      unconditionally), so "when a user rejects or edits a fix" wasn't a
+      moment that could occur yet; this was flagged and confirmed with the
+      user before implementing, same as the privacy question. `scan.ts`
+      gained two new `ScanOptions` hooks: `onVerifiedFix` (called per
+      verified fix, returns `accept` / `reject` / `edit`) and
+      `onFixResolved` (fire-and-forget, reports the final outcome for the
+      caller's own bookkeeping — cli/'s corrections logger is the only
+      current consumer). An edited snippet is re-verified through the
+      exact same `verifyFix` call every AI-generated patch gets before
+      it's ever eligible to be written — accepting this without
+      re-checking would have meant a human-authored edit could reach disk
+      with zero guarantee it actually resolves the violation, undermining
+      the one property this whole tool is built around. If an edit fails
+      verification, `onVerifiedFix` is called again with the failure
+      reason attached, looping until accept/reject; a genuine bug was
+      caught and fixed while re-reading this logic before testing it, not
+      after a test caught it: the `'accept'` branch originally applied
+      `latestAttempt` (whatever was last shown to the user) rather than
+      the original AI suggestion, meaning accepting right after a failed
+      edit attempt would have written that unverified edit to disk. Fixed
+      by making `'accept'` unconditionally mean "the original,
+      already-verified suggestion" — the only path to applying anything
+      else is a fresh edit that itself re-verifies. `src/cli/interactive.ts`
+      implements the terminal prompt (y/n/e/q) via plain `node:readline`
+      against injectable input/output streams, deliberately not spawning
+      `$EDITOR` for the edit case (a real `git commit`-style editor
+      integration would be nicer UX but needs a TTY and subprocess
+      mocking to test hermetically) — multi-line edits are entered
+      line-by-line, terminated by a lone `.`. Testing readline against a
+      scripted mock input stream surfaced two real gotchas, not just
+      theoretical ones: a `Readable` that signals EOF (`push(null)`)
+      makes readline close itself before all queued `question()` calls
+      resolve, breaking any test needing more than one answer; and
+      pushing every scripted line synchronously in one burst caused
+      readline to drop later lines entirely, requiring each line to be
+      pushed on its own `setImmediate` tick instead, matching how a real
+      typing user's input actually arrives one line at a time. `q` (quit)
+      is handled entirely client-side in the handler's own closure state
+      (no scan.ts changes needed) — once quit, every subsequent call
+      returns `reject` immediately without prompting again.
+      `src/cli/corrections-log.ts` writes `.a11y-autofix/corrections.log`
+      as JSON Lines (one entry per rejected/edited fix — accepted fixes
+      are never logged, since accepting isn't a correction). `cli/index.ts`
+      wires both flags in: `--interactive` alone is a dry-run review
+      (nothing is ever written regardless of the answer unless `--write`
+      is also passed); `--json` combined with `--interactive` is rejected
+      outright before scanning, since interleaving prompt text with the
+      final JSON on stdout would corrupt it; `--log-corrections` without
+      `--interactive` prints a warning and continues rather than erroring,
+      since nothing can ever be rejected/edited outside interactive mode
+      for it to log. Tests: `test/scan.test.ts` gained 8 cases covering
+      accept/reject/edit-succeeds/edit-fails-then-rejects/
+      edit-fails-then-succeeds, including one that specifically locks in
+      the accept-after-failed-edit fix above. `test/interactive.test.ts`
+      (8 cases) and `test/corrections-log.test.ts` (4 cases) are new;
+      `test/cli.test.ts` gained 7 integration cases wiring
+      `--interactive`/`--log-corrections` through `runScan` (with
+      `createInteractiveHandler` mocked — the real prompt flow is already
+      covered in `interactive.test.ts`) — one of these caught a second
+      real bug, this time in the test code itself: calling
+      `mock.mockRestore()` before asserting on `toHaveBeenCalledWith`
+      silently zeroed the recorded call history, since `mockRestore()`
+      also clears it, not just restores the original implementation;
+      fixed by asserting before restoring. Full suite: 104 tests across 14
+      files, all passing (excluding the separately-tracked pre-existing
+      `detect.test.ts` flakiness above, unrelated to this feature).
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal
@@ -252,7 +753,10 @@ vitest; `generate/` isn't (see below).
   real-world usage against external projects surfaces this — options include
   resolving React relative to the target and requiring version alignment,
   or switching to a real browser via Playwright for higher-fidelity,
-  isolated rendering.
+  isolated rendering. The Vue render adapter (see the "Vue support" Done
+  entry above) makes the identical tradeoff for `vue` — bundled in via
+  esbuild rather than left external — for the same reason, and inherits
+  the same open risk.
 - `verify/` requires `Patch.oldSnippet` to occur exactly once in the
   current source and throws otherwise (see Done, above); `cli/`'s
   `--write` step reuses that same exported check
@@ -358,3 +862,103 @@ a small, low-risk addition; item 3 needs a `context/` change more than a
 `generate/` one; item 1 isn't a `generate/` issue at all. None of this has
 been applied to `SYSTEM_PROMPT` yet — reported for a decision, not acted
 on unprompted.
+
+## Next violation types — WebAIM Million cross-reference (2026-08-10)
+
+**Caveat up front:** no usage data exists to mine — there are no GitHub
+issues yet (repo just went through npm-publish prep) — so this is axe-core's
+rule list cross-referenced against the [2025 WebAIM Million
+report](https://webaim.org/projects/million/2025) (fetched live), not
+usage-informed. Re-derive this once real `--json` output or issues exist.
+
+**Current 5 already cover 5 of WebAIM's top-6 error categories** (96% of
+all detected errors across the million homepages): low contrast text
+(79.1%, `color-contrast`), missing alt text (55.5%, `image-alt`), missing
+form input labels (48.2%, `label`), empty links (45.4%, `link-name`), and
+empty buttons (29.6%, `button-name`). Only the 6th — missing document
+language (15.8%) — is uncovered, and it's a poor architectural fit (see
+below). So the next 5 have to come from farther down WebAIM's frequency
+list, weighted by fit to the single-JSX-element-replacement architecture
+(`generate/` can only produce a drop-in replacement for one flagged node,
+never add a sibling — same constraint already noted in the `label`
+prompt-quality finding above).
+
+**Implementation status (2026-08-10):** items 1, 2, and 4 shipped as
+recommended — see the "5 more violation types" Done entry above. Items 3
+and 5 turned out not to work as described once probed empirically against
+real axe-core (not just read about) and were replaced, with the user's
+sign-off, by `input-button-name` and `tabindex`; see that same Done entry
+for what broke and why. Left the original reasoning below intact rather
+than rewriting history.
+
+**Recommended next 5, ranked:**
+
+1. **ARIA attribute correctness** (`aria-valid-attr-value`,
+   `aria-required-attr`, `aria-allowed-attr`, `aria-valid-attr`) — 79.4% of
+   homepages now use ARIA outside landmarks (up from 74.6% in 2024), and
+   WebAIM notes ARIA-heavy pages have _more_ errors on average, not fewer.
+   Fix shape: correct/add one attribute value on the flagged node —
+   identical difficulty to the existing `image-alt`/`label` fixes. Easy,
+   high-value.
+2. **ARIA widget accessible names** (`aria-input-field-name`,
+   `select-name`, `aria-toggle-field-name`) — the ARIA-widget sibling of
+   the existing accessible-names bucket: custom `role="combobox"`/
+   `role="switch"` components and native `<select>`, instead of just
+   native buttons/links. React component-library UIs (MUI, Radix, in-house
+   design systems) lean on these patterns more than the marketing
+   homepages WebAIM crawls, so real-world hit rate for this tool's
+   audience likely exceeds WebAIM's raw ranking. Easy.
+3. **Duplicate IDs** (`duplicate-id`, `duplicate-id-aria`,
+   `duplicate-id-active`) — not a headline WebAIM 2025 stat, but a
+   perennial top-10 axe finding and mechanically common in component-based
+   UIs (a component instantiated twice, a static id copy-pasted). Flag:
+   medium difficulty — renaming the flagged id is a single-element edit,
+   but if anything elsewhere references it (`aria-labelledby`,
+   `htmlFor`/`for`), the fix must find and update that too, and
+   `context/` currently only gathers the immediate parent + siblings, which
+   may not see a far-away reference. Needs a scoping decision (widen
+   context-gathering, or refuse to auto-fix ids with external references)
+   before shipping.
+4. **Frame titles** (`frame-title`) — not top-line in WebAIM, but a cheap,
+   safe, single-attribute fix (`title="..."`) frequent in real React apps
+   (embedded maps, video, payment iframes). Same low-risk shape as alt
+   text — Claude just needs nearby context (caption, heading, `src`) to
+   write something reasonable.
+5. **Skip/bypass links** (`bypass`) — 15.3% of homepages have a skip link,
+   but 1 in 10 of those is broken, and most pages have none at all. Scope
+   narrowly to _repairing broken skip-link targets_ (wrong `href`/missing
+   `id` on the target — a legitimate single- or two-element fix), not
+   _adding missing skip links_ (requires inserting a new element, which
+   the current architecture can't do).
+
+**Flagged as high-frequency but not recommended next — architecture
+mismatch, not effort:**
+
+- **`html-has-lang` / `document-title`** (15.8% of pages missing lang) —
+  the only new entry in WebAIM's top 6, but `detect/` renders a single
+  component into a fresh JSDOM document via `@testing-library/react`; the
+  `<html>`/`<title>` a fix would need to touch belongs to the target app's
+  root document, not the component under test, and JSDOM supplies its own
+  shell. Structurally can't fire under component-level scanning as built.
+  Not worth chasing until/unless a whole-app-root scan mode exists.
+- **Table markup** (`th-has-data-cells`, `td-headers-attr`,
+  `scope-attr-valid`) — WebAIM found only 16.6% of tables have valid
+  data-table markup (~83% fail). Very high frequency, but a correct fix
+  requires reasoning about the whole table's header/data-cell
+  relationships across many elements at once, not one flagged node. Same
+  category of problem as headings below — high value, needs an
+  architecture change first.
+- **Heading structure** (`page-has-heading-one`, `heading-order`,
+  `empty-heading`) — also high frequency (39% skipped heading levels,
+  16.3% multiple `<h1>`s, 9.8% no headings at all) but correctness depends
+  on the whole page's heading sequence, and "no `<h1>` present" means
+  inserting an element, which the current architecture can't do (the same
+  sibling-insertion gap already flagged for `label` above). Defer until
+  that structural limitation is addressed generally.
+- **Re-flagging `color-contrast` itself**: it's nominally one of the
+  current 5, but `detect/` disables it outright (see the prompt-quality
+  review above — JSDOM has no real paint/layout). So contrast isn't
+  actually being caught today despite being the single highest-frequency
+  category (79.1%). Worth fixing (canvas polyfill, or a real-browser
+  render via Playwright) before counting it as delivered, independent of
+  this next-5 list.

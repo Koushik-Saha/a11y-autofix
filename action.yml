@@ -1,0 +1,85 @@
+name: 'a11y-autofix'
+description: >-
+  Scan React/Vue components with axe-core, generate verified WCAG fix diffs
+  via the Claude API, and post them on the pull request — verified fixes as
+  inline suggested changes reviewers can accept with one click, everything
+  else in a summary comment for manual review.
+author: 'Koushik Saha'
+branding:
+  icon: 'check-circle'
+  color: 'green'
+
+inputs:
+  path:
+    description: 'Path to scan (a component file or a directory), relative to the repository root.'
+    required: false
+    default: '.'
+  anthropic-api-key:
+    description: 'Anthropic API key used to generate fixes (passed to a11y-autofix as ANTHROPIC_API_KEY).'
+    required: true
+  github-token:
+    description: 'Token used to post the review and summary comment. Needs pull-requests: write.'
+    required: false
+    default: ${{ github.token }}
+  review-event:
+    description: >-
+      Event type for the review that carries the inline suggestions:
+      COMMENT (default) or REQUEST_CHANGES. Never APPROVE — this Action
+      proposes fixes, it does not vouch for the rest of the PR.
+    required: false
+    default: 'COMMENT'
+  fail-on-unresolved:
+    description: >-
+      Fail the job when any violation is unverified or errored (i.e.
+      a11y-autofix could not confidently fix it on its own). A verified
+      fix waiting to be accepted as a suggestion does NOT count as
+      unresolved — see check-unresolved.js.
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Build a11y-autofix from source
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        npm ci
+        npm run build
+        npm pack --pack-destination "${{ runner.temp }}"
+
+    - name: Install a11y-autofix into the workspace
+      shell: bash
+      run: |
+        package_tarball=$(ls "${{ runner.temp }}"/a11y-autofix-*.tgz | head -n1)
+        npm install --no-save "$package_tarball"
+
+    - name: Run a11y-autofix scan
+      id: scan
+      shell: bash
+      continue-on-error: true
+      env:
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+      run: npx a11y-autofix scan "${{ inputs.path }}" --json > "${{ runner.temp }}/a11y-autofix-result.json"
+
+    - name: Post results to the pull request
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        RESULT_FILE: ${{ runner.temp }}/a11y-autofix-result.json
+        REVIEW_EVENT: ${{ inputs.review-event }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: node "${{ github.action_path }}/action/post-results.js"
+
+    - name: Fail if unresolved violations remain
+      if: inputs.fail-on-unresolved == 'true'
+      shell: bash
+      env:
+        RESULT_FILE: ${{ runner.temp }}/a11y-autofix-result.json
+      run: node "${{ github.action_path }}/action/check-unresolved.js"

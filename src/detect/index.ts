@@ -1,20 +1,28 @@
 /**
- * detect/ — runs axe-core against rendered React components and reports
- * WCAG violations. This is the entry point of the pipeline: its output
- * feeds context/, and its verdict format is reused by verify/ to confirm
- * a fix actually resolved the violation.
+ * detect/ — runs axe-core against rendered components and reports WCAG
+ * violations. This is the entry point of the pipeline: its output feeds
+ * context/, and its verdict format is reused by verify/ to confirm a fix
+ * actually resolved the violation.
+ *
+ * This module itself is framework-agnostic: it knows how to run axe-core
+ * against a mounted DOM container and shape the results, but never
+ * compiles or mounts a component itself. All framework-specific work
+ * (React/esbuild+testing-library, Vue/@vue/compiler-sfc) lives behind the
+ * `RenderAdapter` interface in adapters/ — adding Svelte support later
+ * means writing a new adapter and adding it to `ADAPTERS` below, with no
+ * changes needed here or in context/generate/verify.
  */
 
-import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 import type { Result as AxeResult, NodeResult as AxeApiNodeResult } from 'axe-core';
 import axe from 'axe-core';
-import { buildSync } from 'esbuild';
-import * as React from 'react';
-import { cleanup, render } from '@testing-library/react';
 import { JSDOM } from 'jsdom';
+
+import { reactRenderAdapter } from './adapters/react';
+import type { RenderAdapter, RenderOptions } from './adapters/types';
+import { vueRenderAdapter } from './adapters/vue';
 
 export interface AxeNodeResult {
   target: string[];
@@ -40,21 +48,33 @@ export interface DetectResult {
   violations: AxeViolation[];
 }
 
-const COMPONENT_EXTENSIONS = new Set(['.tsx', '.jsx']);
+/**
+ * Adapters are tried in order; the first one whose `supports()` accepts
+ * the component's file extension handles rendering it.
+ */
+const ADAPTERS: RenderAdapter[] = [reactRenderAdapter, vueRenderAdapter];
+
+function findAdapter(componentPath: string): RenderAdapter {
+  const adapter = ADAPTERS.find((candidate) => candidate.supports(componentPath));
+  if (!adapter) {
+    throw new Error(`No render adapter supports component file "${componentPath}"`);
+  }
+  return adapter;
+}
 
 function isComponentFile(fileName: string): boolean {
-  const ext = path.extname(fileName);
-  if (!COMPONENT_EXTENSIONS.has(ext)) return false;
+  if (!ADAPTERS.some((adapter) => adapter.supports(fileName))) return false;
   if (/\.(test|spec)\./.test(fileName)) return false;
   return true;
 }
 
 /**
  * Lists the component file(s) at `componentPath` — itself if it's a file,
- * or every non-test `.tsx`/`.jsx` file directly inside it if it's a
- * directory (non-recursive). Exported so cli/ can resolve a scan target
- * into individual files and run the full per-violation pipeline (which
- * needs a specific file, not a directory) against each one.
+ * or every non-test file directly inside it (of a type some registered
+ * adapter supports) if it's a directory (non-recursive). Exported so cli/
+ * can resolve a scan target into individual files and run the full
+ * per-violation pipeline (which needs a specific file, not a directory)
+ * against each one.
  */
 export function resolveComponentFiles(componentPath: string): string[] {
   const stats = statSync(componentPath);
@@ -67,79 +87,11 @@ export function resolveComponentFiles(componentPath: string): string[] {
     .sort();
 }
 
-function loaderForPath(absolutePath: string): 'tsx' | 'jsx' {
-  return path.extname(absolutePath) === '.jsx' ? 'jsx' : 'tsx';
-}
-
 /**
- * Compiles a component (plus its local imports) to a self-contained
- * CommonJS module via esbuild, so it can be `require`d without the caller
- * needing a build step of their own. Reads from disk unless `source` is
- * given, in which case that text is compiled as if it lived at
- * `absolutePath` — used by verify/ to render a patched component without
- * ever writing it to disk. Either way, imports still resolve against the
- * real directory on disk via `absWorkingDir`/`resolveDir`.
- *
- * React is bundled in (not left external), which assumes a single, hoisted
- * `react` install shared with this package — true here and for typical
- * single-project setups. Scanning a target with its own separately
- * installed React copy could produce a duplicate-React / "invalid hook
- * call" mismatch against the render harness below; that's an open
- * rendering-approach question noted in PLAN.md, not solved here.
- */
-function loadComponentModule(options: { absolutePath: string; source?: string }): unknown {
-  const { absolutePath, source } = options;
-  const result = buildSync({
-    ...(source === undefined
-      ? { entryPoints: [absolutePath] }
-      : {
-          stdin: {
-            contents: source,
-            resolveDir: path.dirname(absolutePath),
-            sourcefile: path.basename(absolutePath),
-            loader: loaderForPath(absolutePath),
-          },
-        }),
-    bundle: true,
-    write: false,
-    platform: 'node',
-    format: 'cjs',
-    jsx: 'automatic',
-    jsxImportSource: 'react',
-    target: 'node18',
-    absWorkingDir: path.dirname(absolutePath),
-  });
-
-  const output = result.outputFiles[0];
-  if (!output) {
-    throw new Error(`esbuild produced no output for ${absolutePath}`);
-  }
-
-  const tempDir = mkdtempSync(path.join(tmpdir(), 'a11y-autofix-'));
-  const tempFile = path.join(tempDir, 'component.cjs');
-  writeFileSync(tempFile, output.text);
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return require(tempFile);
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
-}
-
-function resolveDefaultExport(componentModule: unknown): React.ComponentType {
-  const mod = componentModule as { default?: unknown };
-  const candidate = mod.default ?? componentModule;
-  if (typeof candidate !== 'function') {
-    throw new Error('Component file must have a default export that is a React component');
-  }
-  return candidate as React.ComponentType;
-}
-
-/**
- * Points every global that jsdom + @testing-library/react + axe-core expect
- * (window, document, navigator, ...) at a fresh jsdom instance for the
- * duration of `fn`, then restores whatever was there before.
+ * Points every global that jsdom + axe-core (and whichever render adapter
+ * runs) expect (window, document, navigator, ...) at a fresh jsdom
+ * instance for the duration of `fn`, then restores whatever was there
+ * before.
  *
  * Only copies keys that don't already exist on globalThis (plus window,
  * document, and navigator, which are always forced). jsdom's `window` is a
@@ -223,11 +175,11 @@ function toAxeViolation(violation: AxeResult): AxeViolation {
   };
 }
 
-async function renderAndDetectViolations(componentModule: unknown): Promise<AxeViolation[]> {
-  const Component = resolveDefaultExport(componentModule);
+async function renderAndDetectViolations(options: RenderOptions): Promise<AxeViolation[]> {
+  const adapter = findAdapter(options.absolutePath);
 
   return withJsdomEnvironment(async () => {
-    const { container } = render(React.createElement(Component));
+    const { container, cleanup } = adapter.render(options);
     try {
       // color-contrast needs real layout/rendering (canvas, computed
       // paint), which jsdom can't provide; axe-core's own docs recommend
@@ -244,7 +196,7 @@ async function renderAndDetectViolations(componentModule: unknown): Promise<AxeV
 
 async function detectViolationsInFile(filePath: string): Promise<AxeViolation[]> {
   const absolutePath = path.resolve(filePath);
-  return renderAndDetectViolations(loadComponentModule({ absolutePath }));
+  return renderAndDetectViolations({ absolutePath });
 }
 
 export async function detectViolations(options: DetectOptions): Promise<DetectResult> {
@@ -275,8 +227,6 @@ export async function detectViolationsInSource(
   options: DetectInSourceOptions,
 ): Promise<DetectResult> {
   const absolutePath = path.resolve(options.filePath);
-  const violations = await renderAndDetectViolations(
-    loadComponentModule({ absolutePath, source: options.source }),
-  );
+  const violations = await renderAndDetectViolations({ absolutePath, source: options.source });
   return { componentPath: absolutePath, violations };
 }
