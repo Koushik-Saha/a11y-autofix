@@ -735,6 +735,210 @@ low)` to the verified/unverified line. The GitHub Action's
       files, all passing (excluding the separately-tracked pre-existing
       `detect.test.ts` flakiness above, unrelated to this feature).
 
+- [x] VS Code extension (2026-08-13): new npm workspace at
+      `packages/vscode-extension` (`vscode-a11y-autofix`), chosen over a
+      separate repo so it can depend on this package via `file:../..`
+      instead of a published version, and so `npm run typecheck`/`test` at
+      the root can cover it in one command. Root `package.json` gained
+      `"workspaces": ["packages/*"]`; empirically confirmed a child
+      workspace can't declare a dependency on the monorepo root's own
+      package name via a bare `"*"` version (tried it — a real npm 404, it
+      goes to the public registry rather than linking locally) — `file:`
+      is the correct form, verified to symlink correctly with live-edit
+      reflection (no reinstall needed after editing the root package).
+      **Reuses, doesn't reimplement:** `detectViolations`, `gatherContext`,
+      and `applyPatchToSource` were already exported; `scan.ts`'s private
+      `resolveViolation` (generate + verify + one retry + confidence) is
+      now exported as `resolveFix` specifically so the extension's fix
+      command gets the same retry/confidence behavior `scan()` gives every
+      other caller, for one already-located violation, without
+      reimplementing that loop or paying for a whole-file `scan()` call.
+      **`src/diagnostics.ts`**: turns `detectViolations` +
+      `gatherContext` output into VS Code `Diagnostic`s (1-indexed
+      line/column from the core library converted to VS Code's 0-indexed
+      `Position`); `critical`/`serious` impact maps to `DiagnosticSeverity.Error`,
+      everything else to `Warning`. Scans the file **on disk**, never the
+      live buffer — both `detectViolations` and `gatherContext`'s
+      `FrameworkAdapter`s already read from disk, and mixing a live buffer
+      for one with disk for the other risks the squiggle's location
+      drifting from what a fix would actually target — which is also why
+      `extension.ts` only triggers a rescan on open/save, never on
+      keystroke. A syntax error mid-edit (or any `detectViolations`
+      failure) yields an empty diagnostic list rather than throwing —
+      TypeScript/ESLint already own that error surface. **`src/codeActions.ts`**:
+      a `CodeActionProvider` filtering `context.diagnostics` down to this
+      extension's own (tagged via `diagnostic.source`), one `CodeAction`
+      per match invoking the `a11y-autofix.fix` command with the document
+      URI, diagnostic range, and rule id (read from `diagnostic.code`'s
+      object form — chosen over a bare string specifically so the Problems
+      panel also gets a clickable link to axe-core's own rule docs).
+      **`src/applyFix.ts`**: the fix command handler. Refuses to run
+      against a dirty document (unsaved edits could shift where the
+      violation actually is — same disk-consistency reasoning as
+      diagnostics.ts) rather than trying to reconcile buffer and disk
+      state. Diagnostics carry no live reference back to the `AxeViolation`
+      that produced them, so it re-runs `detectViolations` and
+      disambiguates by rule id plus `gatherContext`'s own start position —
+      the same position the diagnostic was placed at — rather than
+      trusting anything cached from the last scan; if the file changed
+      since, no position matches and it reports "couldn't re-locate"
+      rather than guessing and fixing the wrong element. Calls `resolveFix`
+      for the generate+verify+retry+confidence work, then `applyPatchToSource`
+      plus a `WorkspaceEdit` to apply a verified patch — deliberately
+      leaves the document dirty afterward (standard VS Code quick-fix
+      behavior; the success message says so) rather than force-saving,
+      since a verified _fix_ being applied isn't the same as consent to
+      _save_. **`src/extension.ts`**: activation wiring only — creates the
+      `DiagnosticCollection`, hooks open/save/close/config-change, registers
+      the code action provider and both commands
+      (`a11y-autofix.fix`/`a11y-autofix.rescan`), and syncs the
+      `a11yAutofix.anthropicApiKey` setting into `process.env.ANTHROPIC_API_KEY`
+      (the only way for the setting to reach the Anthropic SDK, which reads
+      that env var itself) — diagnostics need no key at all, only a fix
+      does. **Tests** (18, `vitest`, `vscode` module resolved to a local
+      hand-written mock via `test.alias` in the package's own
+      `vitest.config.ts` — not `vi.mock`, since `vscode` isn't a real
+      resolvable specifier and Vite's test-time alias intercepts resolution
+      before that matters): `diagnostics.test.ts` covers extension
+      filtering, 1-to-0-indexed range conversion, severity mapping, the
+      empty-list-on-throw path, and skip-one-keep-the-rest when a single
+      violation's element can't be located; `codeActions.test.ts` covers
+      source filtering and both diagnostic-code shapes (object and bare
+      string); `applyFix.test.ts` covers the dirty-document guard, the
+      re-location miss case, disambiguating two same-rule violations by
+      exact position, the verified-apply path (asserting the actual
+      `WorkspaceEdit` replacement text), the unverified no-op path, and a
+      thrown `resolveFix` reporting an error without touching the
+      workspace; `extension.test.ts` is a lighter activation smoke test
+      (collection/provider/commands registered, already-open documents
+      scanned on activation). **CI wiring**: root `test`/`typecheck`
+      scripts now delegate to `npm run <script> --workspaces --if-present`
+      after their own root step. Found and fixed a real ordering bug this
+      surfaced, not just a CI-config nicety: the extension's `file:../..`
+      dependency resolves to the root package's `dist/*.d.ts`, which a
+      fresh `npm ci` doesn't build — so `npm run typecheck` failed
+      standalone (not just in a particular CI step order) until the root
+      `typecheck` script itself was changed to build the root package
+      before delegating to the workspace, making `npm run typecheck`
+      self-sufficient regardless of invocation order. Also added a root
+      `vitest.config.ts` excluding `packages/**` — without it, root's
+      zero-config `vitest run` recursively picked up the workspace's own
+      test files too, running them without that package's `vscode` alias
+      and failing with an unresolvable-module error. Verified the entire
+      fix by deleting `dist/` and `node_modules/` in a scratch clone and
+      running `npm ci` followed by the exact CI sequence
+      (typecheck/lint/format:check/build/test) end to end, not just
+      re-running it in an already-built tree. Full monorepo result: 104
+      root tests + 18 extension tests, clean typecheck/lint/format:check/build
+      at both root and workspace level. **Not done**: not packaged as a
+      `.vsix` or published to the Marketplace; no icon/gallery banner;
+      `a11y-autofix.rescan` and the API key setting have no dedicated test
+      beyond the activation smoke test above.
+
+- [x] VS Code extension: settings, save-wiring proof, Marketplace README,
+      vsce packaging (2026-08-14). Four follow-ups to the entry above, one
+      of which surfaced a real, non-obvious packaging bug. **Real-time
+      on save** was already wired (previous entry); rather than re-verify
+      it against a live Extension Host (this environment can't run one),
+      added a firing-based test in `extension.test.ts`: it captures the
+      actual callback `activate()` registers with
+      `onDidSaveTextDocument`/`onDidChangeConfiguration` from the vscode
+      mock and invokes it directly, then asserts the diagnostic collection
+      was actually updated — stronger than the prior test, which only
+      checked that a listener got registered, not that firing it does
+      anything. **`a11yAutofix.disabledRules`** (array of axe-core rule
+      ids): user explicitly chose the extension-only option after being
+      shown that the CLI has no rule-filtering mechanism to match, so
+      "matching the CLI config" wasn't achievable as literally requested —
+      confirmed via `AskUserQuestion` rather than either silently building
+      a mismatched feature or unilaterally scope-creeping into adding CLI
+      support. `diagnostics.ts`'s `scanDocument` filters by rule id
+      _before_ calling `gatherContext` (the more expensive of the two core
+      calls), not after building the diagnostic and discarding it.
+      `extension.ts`'s config-change listener now rescans every open
+      document when `disabledRules` changes (already existed for the API
+      key setting; extended, not duplicated). Required extending the
+      `vscode` test mock: `workspace.getConfiguration` previously always
+      returned the caller's own default, so tests had no way to simulate a
+      non-default setting — added a `configValues` map plus
+      `setConfigValue(fullKey, value)` for tests to populate it.
+      **`packages/vscode-extension/README.md`**: the Marketplace-facing
+      one (distinct from this file and the root README) — features,
+      requirements, a settings table, commands, an explanation of the
+      disk-not-buffer scanning tradeoff aimed at end users rather than
+      contributors, known limitations, and a release-notes section, per
+      Marketplace convention. **vsce packaging — real bug found and fixed
+      empirically, not just configured:** a plain `vsce package` run
+      against the extension as committed genuinely fails: `node_modules/
+a11y-autofix` is a _symlink_ (from the `file:../..` workspace
+      dependency — see the previous entry), and vsce refuses to package
+      any path that resolves outside the extension directory through a
+      symlink — confirmed by actually running it and reading the exact
+      error (`invalid relative path: extension/../../vitest.config.ts`,
+      i.e. it walked through the symlink into this monorepo's own root
+      and tripped on the root's own `vitest.config.ts` sitting there).
+      **A real mistake made and caught while fixing this, worth recording
+      so it isn't repeated:** the first fix attempt ran `npm install
+<tarball> --prefix .` _inside_ `packages/vscode-extension` to swap the
+      symlink for a real copy in place — this corrupted the actual
+      workspace's npm state (subsequent `npm run build` failed with
+      dozens of `npm ERR! extraneous`/`invalid` errors, since npm workspace
+      hoisting no longer matched the root lockfile). Recovered by deleting
+      `packages/vscode-extension/node_modules` and re-running `npm
+install` from the root, confirmed clean via `git status` (nothing
+      tracked was touched — `node_modules/` is gitignored) plus a full
+      typecheck/test pass. **The actual fix**, informed by that failure:
+      never mutate this repo's own `node_modules` for packaging. New
+      `packages/vscode-extension/scripts/package.js` builds both packages
+      normally, then does everything else — `npm pack` the root, copy
+      `package.json`/`README.md`/`LICENSE`/`.vscodeignore`/`dist` into a
+      fresh `fs.mkdtempSync` scratch directory, rewrite the scratch
+      copy's `a11y-autofix` dependency to `file:./<tarball>` (a _tarball_
+      file: reference always extracts to a real directory, never a
+      symlink — the actual fix, not a workaround), `npm install
+--omit=dev` there, then run vsce (via the root-hoisted `node_modules/
+.bin/vsce`, since workspace devDependency binaries hoist to the
+      monorepo root, not the local package) — entirely inside that
+      scratch directory, copying only the resulting `.vsix` back out
+      before deleting it. **Verified beyond "vsce didn't error":**
+      unzipped the produced `.vsix` and confirmed `node_modules/
+a11y-autofix` is a real (non-symlink) directory; loaded the packaged
+      `dist/extension.js` in a plain Node process against a hand-stubbed
+      `vscode` module and confirmed it requires cleanly — since
+      `src/index.ts` eagerly re-exports `detect`/`context`/`generate`/
+      `verify`/`scan`, this also proves every one of their heavy runtime
+      dependencies (`ts-morph`, `jsdom`, `@vue/compiler-sfc`, `axe-core`,
+      `@anthropic-ai/sdk`, `zod`) resolves correctly inside the packaged
+      tree, not just the extension's own four small source files. vsce's
+      own output is honest about the result, not hidden: 5618 files,
+      24.3 MB, with vsce's built-in warning to bundle for size — a real,
+      known limitation (this pulls in the core library's full dependency
+      tree, unbundled) left as a follow-up rather than papered over or
+      silently fixed with a risky full-bundle rewrite of untested scope.
+      `.vscodeignore` gained `scripts/**`, `vitest.config.ts`, `*.tgz`,
+      `*.vsix`; root `.gitignore` gained `*.vsix`/`*.tgz` so build
+      artifacts never get committed. **Second real bug found while
+      verifying, unrelated to packaging directly:** root
+      `eslint.config.js`'s ignore pattern was `dist/**`/`node_modules/**`
+      — matches only top-level `dist/`, not `packages/*/dist/**` — so
+      `npm run lint` started failing against the extension's own _compiled
+      output_ the moment it had a `dist/` on disk (order-dependent: passed
+      before a build had run, failed after). Fixed to `**/dist/**`/`**/
+node_modules/**`; also added a `packages/*/scripts/**/*.js` block
+      (Node globals, `require` imports allowed) for `package.js` itself,
+      mirroring the existing `action/**/*.js` exception. `LICENSE` (MIT)
+      copied into the extension package directory — `vsce`/Marketplace
+      convention expects one physically present alongside a
+      `"license": "MIT"` in `package.json`, not just inherited from the
+      monorepo root. `vsce publish` was deliberately never run — it needs
+      a personal access token this environment doesn't have and would
+      make the extension publicly visible on the Marketplace, a
+      one-directional action appropriately left to a human. Full suite
+      after all of this: 104 root tests + 23 extension tests (5 new:
+      2 settings-filtering cases, 3 wiring-firing cases), clean
+      typecheck/lint/format:check/build at both root and workspace level,
+      confirmed via the actual `.vsix` build succeeding end to end.
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal

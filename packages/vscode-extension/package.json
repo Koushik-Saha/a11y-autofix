@@ -1,0 +1,78 @@
+{
+  "name": "vscode-a11y-autofix",
+  "displayName": "a11y-autofix",
+  "description": "Inline WCAG diagnostics for React and Vue components, with one-click verified fixes — powered by the a11y-autofix CLI's detect/context/generate/verify pipeline.",
+  "version": "0.1.0",
+  "publisher": "koushik-saha",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Koushik-Saha/a11y-autofix.git",
+    "directory": "packages/vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18"
+  },
+  "categories": [
+    "Linters"
+  ],
+  "keywords": [
+    "accessibility",
+    "a11y",
+    "axe-core",
+    "react",
+    "vue",
+    "wcag"
+  ],
+  "activationEvents": [
+    "onLanguage:javascriptreact",
+    "onLanguage:typescriptreact",
+    "onLanguage:vue"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "a11y-autofix.fix",
+        "title": "Fix with a11y-autofix"
+      },
+      {
+        "command": "a11y-autofix.rescan",
+        "title": "a11y-autofix: Rescan this file"
+      }
+    ],
+    "configuration": {
+      "title": "a11y-autofix",
+      "properties": {
+        "a11yAutofix.anthropicApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic API key used to generate fixes. Optional — if unset, falls back to the ANTHROPIC_API_KEY environment variable the CLI already uses. Diagnostics (the red squiggles) never need this; it's only read when you invoke a fix."
+        },
+        "a11yAutofix.disabledRules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "axe-core rule ids to never show as diagnostics, e.g. [\"landmark-unique\", \"tabindex\"]. Extension-only setting — the CLI has no equivalent yet."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "node scripts/package.js"
+  },
+  "dependencies": {
+    "a11y-autofix": "file:../.."
+  },
+  "devDependencies": {
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "^3.9.2"
+  }
+}

@@ -193,6 +193,21 @@ jobs:
 
 **A note on `pull_request_target`:** the Action also runs on `pull_request_target` events (needed if your workflow scans fork PRs with write access), but that event runs with your base branch's secrets and permissions by default — the usual fork-PR security caveats apply to your workflow, not to anything this Action does differently. If you're not sure you need it, use `pull_request`.
 
+## VS Code extension
+
+`packages/vscode-extension` (npm workspace, published separately as `vscode-a11y-autofix`) runs the same pipeline inline in the editor — no separate CLI invocation needed:
+
+- **Red squiggles** on every axe-core violation, scanned on file open/save (deliberately not on every keystroke — see below).
+- **"Fix with a11y-autofix"** quick fix on each squiggle, which generates and verifies a patch via the same `resolveFix` the CLI uses (one retry, confidence-scored) and applies it to the buffer only once it verifies. Nothing is written for an unverified fix — same guarantee as everywhere else in this tool.
+
+It imports `detectViolations`, `gatherContext`, `resolveFix`, and `applyPatchToSource` directly from this package (via a `file:../..` workspace dependency) rather than reimplementing any detection, generation, or verification logic.
+
+Scanning reads the file **from disk**, not the live editor buffer — the same `FrameworkAdapter`s the CLI uses (ts-morph for React, `@vue/compiler-sfc` for Vue) always read from disk, and mixing that with a live buffer would risk a squiggle's location drifting from what a fix actually targets. This is why scans run on open/save rather than on every keystroke, and why the fix command refuses to run against a dirty (unsaved) document. The `a11yAutofix.disabledRules` setting (a list of axe-core rule ids) filters diagnostics client-side and isn't shared with the CLI, which has no rule-filtering config of its own yet.
+
+Not yet published to the VS Code Marketplace. To run it locally: `npm install` at the repo root, then open `packages/vscode-extension` in VS Code and press F5 (`Run Extension`) to launch an Extension Development Host. Set the `a11yAutofix.anthropicApiKey` setting, or export `ANTHROPIC_API_KEY`, before invoking a fix — diagnostics alone need no API key.
+
+To build an installable `.vsix` instead: `npm run package` inside `packages/vscode-extension`. This does more than call `vsce package` directly — see `packages/vscode-extension/scripts/package.js` and its `PLAN.md` entry for why a plain `vsce package` fails against this monorepo's `file:../..` dependency, and how the script works around it in an isolated scratch directory without touching this repo's own `node_modules`. `vsce publish` itself is left to a human with marketplace publishing rights; nothing here runs it automatically.
+
 ## How the verify loop works
 
 This is the part that makes the tool trustworthy rather than just plausible. The core risk with any LLM-generated fix is that the model _says_ it fixed something but didn't — so nothing here takes Claude's word for it.

@@ -70,11 +70,11 @@ export type PatchConfidence = 'high' | 'medium' | 'low';
 
 /**
  * A Patch plus how much retrying it took to get here — see
- * `resolveViolation`'s doc comment below for exactly what each level
- * means. Only `scan.ts` can compute this (it's the one place that knows
- * about retries), so it's a superset of `generate/`'s plain `Patch`
- * rather than a field on `Patch` itself — a bare `generateFix()` call has
- * no basis for claiming any confidence level at all.
+ * `resolveFix`'s doc comment below for exactly what each level means.
+ * Only `scan.ts` can compute this (it's the one place that knows about
+ * retries), so it's a superset of `generate/`'s plain `Patch` rather than
+ * a field on `Patch` itself — a bare `generateFix()` call has no basis
+ * for claiming any confidence level at all.
  */
 export interface ScoredPatch extends Patch {
   confidence: PatchConfidence;
@@ -139,8 +139,14 @@ async function attemptFix(
  * Sequential, not concurrent, for the same reason `verify/`'s two
  * detect-in-source calls are: each render swaps process-wide globals for
  * its duration (see detect/'s `withJsdomEnvironment`).
+ *
+ * Exported (not just an internal `scanFile` helper) so a caller that
+ * already has its own `FixContext` — e.g. the VS Code extension's fix
+ * command, which locates a single already-known violation itself rather
+ * than scanning a whole file — can get the same retry/confidence behavior
+ * `scan()` gives every other consumer, without reimplementing this loop.
  */
-async function resolveViolation(
+export async function resolveFix(
   context: FixContext,
   violation: AxeViolation,
 ): Promise<{ patch: ScoredPatch; verification: VerificationResult }> {
@@ -265,7 +271,7 @@ async function scanFile(file: string, options: ScanOptions): Promise<ScanViolati
   for (const violation of violations) {
     try {
       const context = await gatherContext({ violation, componentPath: file });
-      const resolved = await resolveViolation(context, violation);
+      const resolved = await resolveFix(context, violation);
 
       let patch = resolved.patch;
       let verification = resolved.verification;

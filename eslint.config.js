@@ -6,7 +6,7 @@ const globals = require('globals');
 
 module.exports = tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**'],
+    ignores: ['**/dist/**', '**/node_modules/**'],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
@@ -29,7 +29,7 @@ module.exports = tseslint.config(
     },
   },
   {
-    files: ['action/**/*.js'],
+    files: ['action/**/*.js', 'packages/*/scripts/**/*.js'],
     languageOptions: {
       globals: globals.node,
     },
