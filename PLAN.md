@@ -1042,6 +1042,38 @@ node_modules/**`; also added a `packages/*/scripts/**/*.js` block
       violations plus a clean file — jsdom and browser, scan(), CLI
       output order).
 
+- [x] Resolved dynamic props and handler bodies (2026-10-28):
+      `context/adapters/resolve.ts` adds optional `FixContext.resolved`
+      (`values`, `handlers`), present only when something resolved, so an
+      unresolvable element's context and prompt are exactly as before.
+      Purely static, ts-morph AST only, nothing evaluated. **Resolves:**
+      string/number literals, template literals and `+` concatenation
+      (unresolved parts kept as `${expr}` and flagged `complete: false`),
+      `const` chains, `CONST.prop` on a const object literal; handlers that
+      are function declarations, `const` arrow/function expressions,
+      `useCallback(fn, …)`, or aliases of those; across relative imports
+      (named, default, namespace, `export { a as b }`, re-exports,
+      `export *`). Vue: `:prop`/`@event` bindings with a static argument,
+      looked up in `<script setup>`. **Refuses:** `let`/`var`, function
+      parameters and destructured props, loop/catch variables (all
+      shadow outer names), calls, conditionals; non-relative imports
+      (packages, path aliases), any path with a `node_modules` segment,
+      non-script files. **Caps:** 6 hops per value, 8 imported files and
+      256 KB per file, 300 chars per value, 30 lines per handler (then
+      "… N more lines not shown"), 4,000 chars total per element (items
+      that don't fit are dropped). Any resolver error → no `resolved`,
+      never a failed gatherContext. The user prompt labels these as
+      "resolved from source … context only"; the system prompt gets one
+      line: use them for specific alt text/labels, never mention them in
+      the fix. Tests: `test/context-resolve.test.ts` (fixtures
+      `ResolvedAvatar.tsx`, `InFileHandlerButton.tsx`,
+      `ImportedHandlerButton.tsx` + `fixtures/lib/projectActions.ts`,
+      `VueResolvedCard.vue`; `TypedMissingAlt.tsx` as the unresolvable
+      case; refusals and caps on scratch components). **Limitations:**
+      children like `<button>{label}</button>` aren't resolved (props
+      only); class methods (`this.handleX`) and Options API Vue aren't
+      followed; no real-model run yet.
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal
@@ -1141,6 +1173,12 @@ image with no nearby text, no prompt wording fixes a genuine information
 gap. If this turns out to be a real problem in practice, it's a `context/`
 scoping question (resolve simple prop values, inline handler bodies) more
 than a `generate/` prompt one.
+
+_Update 2026-10-28:_ addressed in `context/` — `FixContext.resolved` now
+carries statically resolved prop values and handler bodies (see the
+"Resolved dynamic props" Done entry), and the prompt has one line on using
+them. Still bounded: props, parameters and anything computed at runtime
+stay opaque, and there's still no real-model check.
 
 **4. `link-name` — the prompt doesn't distinguish "has an accessible name"
 from "is genuinely accessible."** axe-core's `link-name` check (like
