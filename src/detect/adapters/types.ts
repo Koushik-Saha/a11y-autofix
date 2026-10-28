@@ -33,4 +33,14 @@ export interface RenderAdapter {
   supports(componentPath: string): boolean;
   /** Compiles and mounts the component into a fresh DOM container. Must be called inside the shared jsdom environment (see detect/index.ts's `withJsdomEnvironment`). */
   render(options: RenderOptions): RenderResult;
+  /**
+   * Compiles the component into a self-contained browser script for
+   * detect/'s real-browser path (`--browser`). Running the script mounts
+   * the component into a fresh `<div>` appended to `<body>` — the same
+   * structure `render()` produces in jsdom, so axe-core's selectors line
+   * up — and exposes it as `window.__a11yAutofixContainer`. If mounting
+   * fails, it sets `window.__a11yAutofixMountError` instead of throwing.
+   * See adapters/browser-bundle.ts.
+   */
+  bundleForBrowser(options: RenderOptions): Promise<string>;
 }

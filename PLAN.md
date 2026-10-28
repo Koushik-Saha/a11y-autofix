@@ -85,7 +85,11 @@ from 'a11y-autofix'`) call into it.
   files compiled on the fly (`esbuild`, bundled CJS — JSX-transformed for
   React; script+template compiled via `@vue/compiler-sfc` then bundled for
   Vue) so `detect/` can render arbitrary `.tsx`/`.jsx`/`.vue` files without
-  the caller needing a build step of their own.
+  the caller needing a build step of their own. Opt-in second environment
+  (`--browser` / `{ browser: true }`): headless Chromium via Playwright
+  (optional peer dependency), same components bundled by esbuild for the
+  browser, axe-core injected into the page with its full default ruleset —
+  the only way `color-contrast` is detected. jsdom stays the default.
 - **Tests**: `vitest`.
 - **Source parsing**: `ts-morph` for locating and extracting JSX/TypeScript
   AST nodes (React) and for a second pass over a Vue `<script setup>`
@@ -938,6 +942,46 @@ node_modules/**`; also added a `packages/*/scripts/**/*.js` block
       2 settings-filtering cases, 3 wiring-firing cases), clean
       typecheck/lint/format:check/build at both root and workspace level,
       confirmed via the actual `.vsix` build succeeding end to end.
+- [x] Real-browser detection, `color-contrast` included (2026-10-28):
+      `scan --browser` / `scan(path, { browser: true })` renders in
+      headless Chromium via Playwright. Each `RenderAdapter` gained
+      `bundleForBrowser()` (adapters/browser-bundle.ts: the same esbuild
+      setup, IIFE for the browser, mounting into a plain `<div>` under
+      `<body>` exactly like testing-library does in jsdom so axe's
+      selectors and context/'s AST lookup line up); `detect/browser.ts`
+      injects `axe.source` and runs the full default ruleset against that
+      container. Results go through the same `toAxeViolation`, and
+      `test/browser-detect.test.ts` asserts that, apart from
+      `color-contrast`, browser mode returns deep-equal violations to jsdom
+      for every fixture. One shared, ref-counted Chromium per scan.
+      **No fallback**: missing Playwright/Chromium is a
+      `BrowserUnavailableError` with install commands
+      (`test/browser-unavailable.test.ts` pins it, incl. that `scan()`
+      rejects rather than scanning in jsdom). verify/ re-checks in the
+      detection mode and refuses to verify a `color-contrast` fix in jsdom
+      (it would always "pass"). Fix side (`generate/contrast.ts`): the
+      target text color is computed in code — axe's measured
+      fg/bg/required ratio parsed from `failureSummary`, the fg's HSL
+      lightness moved the minimal amount (darker or lighter, whichever is
+      smaller) to clear the ratio, hue/saturation kept (`#cccccc` on white
+      → `#767676`) — and the prompt tells the model to use exactly that
+      value and not touch background, fonts, or copy. A background
+      image/gradient on the element or its parent, or a ratio no text color
+      can reach, is `NotAutoFixableError` before any model call →
+      `status: 'errored'`, `reason: 'not-auto-fixable'`, CLI
+      `[not auto-fixable]`. Added `VueLowContrastText.vue`. CI installs
+      the Chromium headless shell and sets `A11Y_AUTOFIX_REQUIRE_BROWSER=1`
+      so browser tests fail rather than skip there; locally they skip when
+      Chromium is missing. Playwright pinned to 1.61.1, the last release
+      supporting Node 18. **Limitations:** jsdom mode still cannot detect
+      contrast (pinned by `test/pipeline-e2e.test.ts`); the background
+      image check only sees the element and its parent's source (an
+      ancestor or stylesheet image isn't seen — though axe-core itself
+      reports text over images as "needs review", not a violation, and
+      those incomplete results aren't surfaced); "only the text color
+      changed" is enforced by the prompt plus re-verification, not by a
+      diff check on the patch; the real-model prompt hasn't been exercised
+      yet (no API key in this environment — the tests mock `generateFix`).
 
 ### Not started
 
@@ -999,6 +1043,10 @@ impl via the `canvas` npm package, or moving to a real browser via
 Playwright — see the jsdom limitation noted earlier in this file), not a
 `generate/` change. Flagging it here so it isn't mistaken for a
 `generate/` weakness later.
+
+_Update 2026-10-28:_ resolved for `--browser` mode, which renders in real
+Chromium and detects it (see the Done entry). jsdom mode — still the
+default — still cannot, for exactly the reason above.
 
 **2. `label` — the prompt's own scope rule blocks the more idiomatic fix.**
 The system prompt forbids touching anything but the one flagged element
@@ -1160,9 +1208,7 @@ mismatch, not effort:**
   sibling-insertion gap already flagged for `label` above). Defer until
   that structural limitation is addressed generally.
 - **Re-flagging `color-contrast` itself**: it's nominally one of the
-  current 5, but `detect/` disables it outright (see the prompt-quality
-  review above — JSDOM has no real paint/layout). So contrast isn't
-  actually being caught today despite being the single highest-frequency
-  category (79.1%). Worth fixing (canvas polyfill, or a real-browser
-  render via Playwright) before counting it as delivered, independent of
-  this next-5 list.
+  current 5, but `detect/` disables it outright in jsdom mode (see the
+  prompt-quality review above — JSDOM has no real paint/layout).
+  _Update 2026-10-28:_ now caught in `--browser` mode (real-browser render
+  via Playwright); the default jsdom mode still can't detect it.

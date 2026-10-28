@@ -56,6 +56,32 @@ Pass `--json` to get the full scan result as machine-readable JSON on stdout ins
 npx a11y-autofix scan src/components --json > result.json
 ```
 
+### Color contrast (`--browser`)
+
+By default, components are rendered in [jsdom](https://github.com/jsdom/jsdom): fast, with no browser to download. But jsdom has no layout or paint, so axe-core can't measure contrast there, and **the default mode cannot detect `color-contrast` violations** (low-contrast text, the most common accessibility failure on the web). `--browser` renders each component in headless Chromium via [Playwright](https://playwright.dev) instead and runs axe-core's full default ruleset, `color-contrast` included:
+
+```sh
+npm install --save-dev playwright      # optional peer dependency, only needed for --browser
+npx playwright install chromium
+npx a11y-autofix scan src/components --browser
+```
+
+```
+src/components/Notice.tsx
+  [violation] color-contrast (serious): Elements must meet minimum color contrast ratio thresholds
+  --- a/src/components/Notice.tsx
+  +++ b/src/components/Notice.tsx
+  @@ -14,3 +14,3 @@
+  -<p style={{ color: '#cccccc', backgroundColor: '#ffffff' }}>
+  +<p style={{ color: '#767676', backgroundColor: '#ffffff' }}>
+  [verified] fix confirmed (pass --write to apply) (confidence: high)
+```
+
+- **Everything else is identical.** Same components, same esbuild bundling, same violation format. The test suite checks that, apart from `color-contrast`, browser mode reports exactly the same violations as jsdom mode for every fixture. Fixes are verified in the same mode they were detected in.
+- **It never falls back to jsdom.** If Playwright or its Chromium isn't installed, `--browser` exits non-zero with the command to install it. It does not quietly scan in jsdom, which would quietly skip contrast.
+- **Contrast fixes keep your colors.** The fix changes only the text color: the existing color, same hue, darkened or lightened by the smallest amount that meets the ratio axe-core requires. That color is computed in code, not by the model, and the model is told not to touch the background, fonts or text. If the text sits on a background image or gradient, there's no single background color to compute against, so the violation is reported as `[not auto-fixable]` and left for you rather than guessed.
+- **Slower.** Chromium takes a few seconds to launch (once per scan, shared by every render), then roughly 0.3–1s per render. Each fix is rendered twice to verify it.
+
 ### Interactive mode
 
 `--write` applies every verified fix unconditionally. `--interactive` reviews them one at a time instead:
@@ -140,13 +166,15 @@ for (const entry of result.violations) {
 
 `result.violations` is a discriminated union on `status`:
 
-| `status`       | Fields available                                               | Meaning                                                                                                                                                     |
-| -------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `'verified'`   | `context`, `patch`, `verification`, `applied`                  | The fix resolved the violation with no regressions. `applied` is `true` only if `write` was passed.                                                         |
-| `'unverified'` | `context`, `patch`, `verification`, `applied` (always `false`) | A fix was generated but axe-core still flags something after applying it — see `verification.remainingViolations` / `newViolations`. Never written to disk. |
-| `'errored'`    | `error`                                                        | context/generate/verify threw for this violation (e.g. an unfixable JSX node, a Claude API error) — the rest of the scan continues.                         |
+| `status`       | Fields available                                               | Meaning                                                                                                                                                                                                                                  |
+| -------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'verified'`   | `context`, `patch`, `verification`, `applied`                  | The fix resolved the violation with no regressions. `applied` is `true` only if `write` was passed.                                                                                                                                      |
+| `'unverified'` | `context`, `patch`, `verification`, `applied` (always `false`) | A fix was generated but axe-core still flags something after applying it — see `verification.remainingViolations` / `newViolations`. Never written to disk.                                                                              |
+| `'errored'`    | `error`, `reason?`                                             | context/generate/verify threw for this violation (e.g. an unfixable JSX node, a Claude API error) — the rest of the scan continues. `reason: 'not-auto-fixable'` marks a deliberate refusal (e.g. low contrast over a background image). |
 
-`scan()` throws only if `targetPath` doesn't exist; per-violation failures never abort the scan.
+`scan()` throws only if `targetPath` doesn't exist, or (with `{ browser: true }`) if Playwright/Chromium can't be launched — a `BrowserUnavailableError`, never a silent fallback to jsdom. Per-violation failures never abort the scan.
+
+Pass `{ browser: true }` to detect and verify in headless Chromium, which adds `color-contrast` checks — see [Color contrast](#color-contrast---browser). `detectViolations` and `verifyFix` take the same `browser` option.
 
 `patch.confidence` (`'high' | 'medium' | 'low'`) records how many generation attempts it took: `'high'` verified on the first try, `'medium'` needed one retry (the model was shown the rejected attempt and why), `'low'` means both attempts failed and `status` is `'unverified'`. It's present on every `patch`, regardless of `status`.
 
@@ -219,7 +247,7 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
    +----------------------- re-run axe-core against the patched component -----+
 ```
 
-1. **detect** renders your component in a real DOM (jsdom, plus `@testing-library/react` for React or Vue's own `createApp().mount()` for Vue) and runs axe-core against it — real accessibility testing, not pattern matching.
+1. **detect** renders your component in a real DOM (jsdom, plus `@testing-library/react` for React or Vue's own `createApp().mount()` for Vue; or headless Chromium with `--browser`) and runs axe-core against it — real accessibility testing, not pattern matching.
 2. **context** locates the exact element behind a violation by parsing the component's AST (JSX via ts-morph for React, the template AST via `@vue/compiler-sfc` for Vue) — never by string-matching source text — and extracts it, its parent, its siblings, and its prop types, so the model has real surrounding context to work from.
 3. **generate** sends Claude only that one element and constrains its response, via structured output, to a single field: the replacement markup. It cannot touch the parent, the siblings, or anything else in the file.
 4. **verify** is the trust boundary. It applies the proposed patch to the component's source **in memory only** — the file on disk is never modified at this stage — re-renders the patched component, and re-runs axe-core against it. Two things have to be true for a fix to pass:
@@ -232,7 +260,7 @@ If you run with `--write`, this is also the only thing that decides what touches
 
 **One retry, fed the failure.** If step 4 comes back `unverified`, `scan()` doesn't just give up — it calls **generate** exactly one more time, this time showing the model its rejected attempt and _why_ it was rejected (which rule was still flagged, or what new violation it introduced), then re-runs **verify** on the result. Whether that took zero retries or one is recorded as `patch.confidence`: `'high'` for a first-attempt pass, `'medium'` for a fix that needed the retry, `'low'` if both attempts failed (`status` stays `unverified` either way — the retry only affects `confidence`, never what counts as verified). The [GitHub Action](#github-action) uses this: only `'high'`-confidence fixes become one-click inline suggestions, so a fix that needed convincing gets a human's eyes on it first.
 
-See [`PLAN.md`](./PLAN.md) for the full module-by-module design notes, including known limitations (e.g. `color-contrast` currently can't be detected — jsdom has no real paint implementation for axe-core to measure against) and open decisions.
+See [`PLAN.md`](./PLAN.md) for the full module-by-module design notes, including known limitations (e.g. `color-contrast` can't be detected in the default jsdom mode — jsdom has no real paint implementation for axe-core to measure against — only with `--browser`) and open decisions.
 
 ## Contributing
 

@@ -30,6 +30,12 @@ export interface VerificationResult {
 export interface VerifyFixOptions {
   patch: Patch;
   originalViolation: AxeViolation;
+  /**
+   * Re-check in headless Chromium instead of jsdom — must match the mode
+   * the violation was detected in (a color-contrast violation can only be
+   * confirmed fixed in browser mode). See detect/'s `DetectOptions.browser`.
+   */
+  browser?: boolean;
 }
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -61,6 +67,15 @@ export function applyPatchToSource(source: string, patch: Patch): string {
 
 export async function verifyFix(options: VerifyFixOptions): Promise<VerificationResult> {
   const { patch, originalViolation } = options;
+  const browser = Boolean(options.browser);
+
+  // jsdom never reports color-contrast, so a jsdom re-check would call any
+  // patch "verified". Refuse rather than return a false positive.
+  if (!browser && originalViolation.id === 'color-contrast') {
+    throw new Error(
+      'color-contrast fixes can only be verified in browser mode (--browser / { browser: true }); jsdom cannot measure contrast.',
+    );
+  }
   const filePath = path.resolve(patch.filePath);
 
   const originalSource = readFileSync(filePath, 'utf8');
@@ -74,8 +89,8 @@ export async function verifyFix(options: VerifyFixOptions): Promise<Verification
   // Sequential, not Promise.all: each render swaps process-wide globals
   // (see detect/'s withJsdomEnvironment) for its duration, so two renders
   // can't safely run concurrently in this process.
-  const before = await detectViolationsInSource({ source: originalSource, filePath });
-  const after = await detectViolationsInSource({ source: patchedSource, filePath });
+  const before = await detectViolationsInSource({ source: originalSource, filePath, browser });
+  const after = await detectViolationsInSource({ source: patchedSource, filePath, browser });
 
   const beforeRuleIds = new Set(before.violations.map((violation) => violation.id));
   const remainingViolations = after.violations.filter(

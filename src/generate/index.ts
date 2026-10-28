@@ -11,6 +11,27 @@ import { z } from 'zod';
 import type { AxeViolation } from '../detect';
 import type { FixContext } from '../context';
 
+import {
+  buildContrastSection,
+  findBackgroundImage,
+  parseContrastSummary,
+  suggestTextColor,
+} from './contrast';
+import type { ContrastMeasurement, ContrastSuggestion } from './contrast';
+
+/**
+ * Thrown before any model call when a violation can't be fixed safely by
+ * editing the element — e.g. low contrast over a background image or
+ * gradient. scan/ reports these as `status: 'errored'` with
+ * `reason: 'not-auto-fixable'`: unresolved, but deliberately not guessed.
+ */
+export class NotAutoFixableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NotAutoFixableError';
+  }
+}
+
 export interface Patch {
   filePath: string;
   violationId: string;
@@ -63,9 +84,14 @@ If you are shown a previous attempt that was rejected, produce a genuinely diffe
 
 function buildRetrySection(previousAttempt: PreviousAttempt): string {
   const reasons = [
-    ...previousAttempt.remainingViolations.map(
-      (violation) => `still flagged: ${violation.id} (${violation.help})`,
-    ),
+    ...previousAttempt.remainingViolations.map((violation) => {
+      const reason = `still flagged: ${violation.id} (${violation.help})`;
+      // For contrast, axe's measurement of the rejected color is what tells
+      // the model how much further to go.
+      const detail =
+        violation.id === 'color-contrast' ? violation.nodes[0]?.failureSummary : undefined;
+      return detail ? `${reason} — axe-core detail: ${detail}` : reason;
+    }),
     ...previousAttempt.newViolations.map(
       (violation) => `introduced a new violation: ${violation.id} (${violation.help})`,
     ),
@@ -87,7 +113,48 @@ function buildRetrySection(previousAttempt: PreviousAttempt): string {
     .join('\n');
 }
 
-function buildUserPrompt(context: FixContext, previousAttempt?: PreviousAttempt): string {
+interface ContrastPlan {
+  measurement: ContrastMeasurement | null;
+  suggestion: ContrastSuggestion | null;
+}
+
+/**
+ * For a color-contrast violation: refuses (NotAutoFixableError) when a
+ * background image/gradient is involved or no text color can reach the
+ * ratio, otherwise works out the minimal text color to suggest. Null for
+ * every other rule.
+ */
+function planContrastFix(context: FixContext): ContrastPlan | null {
+  if (context.violation.id !== 'color-contrast') return null;
+
+  const backgroundImage = findBackgroundImage(context);
+  if (backgroundImage) {
+    throw new NotAutoFixableError(
+      `Not auto-fixable: this low-contrast text sits on a background image or gradient ("${backgroundImage}"), so there is no single background color to fix the text color against. Check it manually.`,
+    );
+  }
+
+  const measurement = parseContrastSummary(context.violation.nodes[0]?.failureSummary);
+  if (!measurement) return { measurement: null, suggestion: null };
+
+  const suggestion = suggestTextColor(
+    measurement.foreground,
+    measurement.background,
+    measurement.expectedRatio,
+  );
+  if (!suggestion) {
+    throw new NotAutoFixableError(
+      `Not auto-fixable: no text color reaches the required ${measurement.expectedRatio}:1 against ${measurement.background} without changing the background. Check it manually.`,
+    );
+  }
+  return { measurement, suggestion };
+}
+
+function buildUserPrompt(
+  context: FixContext,
+  previousAttempt: PreviousAttempt | undefined,
+  contrastPlan: ContrastPlan | null,
+): string {
   const { violation, element, parent, siblings, propTypes } = context;
   const violationNode = violation.nodes[0];
 
@@ -110,6 +177,7 @@ function buildUserPrompt(context: FixContext, previousAttempt?: PreviousAttempt)
           .join('\n')}`
       : null,
     propTypes ? `\nComponent prop types (context only):\n\`\`\`ts\n${propTypes}\n\`\`\`` : null,
+    contrastPlan ? buildContrastSection(contrastPlan.measurement, contrastPlan.suggestion) : null,
     previousAttempt ? buildRetrySection(previousAttempt) : null,
   ];
 
@@ -119,13 +187,17 @@ function buildUserPrompt(context: FixContext, previousAttempt?: PreviousAttempt)
 export async function generateFix(options: GenerateFixOptions): Promise<Patch> {
   const { context, previousAttempt } = options;
 
+  // Before creating the client: a not-auto-fixable violation never costs
+  // a model call.
+  const contrastPlan = planContrastFix(context);
+
   const client = new Anthropic();
   const response = await client.messages.parse({
     model: 'claude-opus-5',
     max_tokens: 8000,
     thinking: { type: 'adaptive' },
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildUserPrompt(context, previousAttempt) }],
+    messages: [{ role: 'user', content: buildUserPrompt(context, previousAttempt, contrastPlan) }],
     output_config: { format: zodOutputFormat(PatchSuggestionSchema) },
   });
 

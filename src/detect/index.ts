@@ -11,6 +11,13 @@
  * `RenderAdapter` interface in adapters/ — adding Svelte support later
  * means writing a new adapter and adding it to `ADAPTERS` below, with no
  * changes needed here or in context/generate/verify.
+ *
+ * Two rendering environments share that adapter list:
+ *  - jsdom (the default): fast, no browser needed, but it has no layout or
+ *    paint, so axe-core's `color-contrast` rule is disabled there.
+ *  - real Chromium via Playwright (`browser: true`, see ./browser.ts):
+ *    slower and needs Playwright + its Chromium installed, but runs the
+ *    full default ruleset, including `color-contrast`.
  */
 
 import { readdirSync, statSync } from 'node:fs';
@@ -21,6 +28,7 @@ import axe from 'axe-core';
 import { JSDOM } from 'jsdom';
 
 import { reactRenderAdapter } from './adapters/react';
+import { runAxeInBrowser, withBrowserSession } from './browser';
 import type { RenderAdapter, RenderOptions } from './adapters/types';
 import { vueRenderAdapter } from './adapters/vue';
 
@@ -39,8 +47,17 @@ export interface AxeViolation {
   nodes: AxeNodeResult[];
 }
 
+export { BrowserUnavailableError } from './browser';
+
 export interface DetectOptions {
   componentPath: string;
+  /**
+   * Render in headless Chromium (via Playwright) instead of jsdom, so
+   * axe-core can check `color-contrast`. Throws `BrowserUnavailableError`
+   * if Playwright or its Chromium isn't installed — never falls back to
+   * jsdom.
+   */
+  browser?: boolean;
 }
 
 export interface DetectResult {
@@ -175,15 +192,24 @@ function toAxeViolation(violation: AxeResult): AxeViolation {
   };
 }
 
-async function renderAndDetectViolations(options: RenderOptions): Promise<AxeViolation[]> {
+async function renderAndDetectViolations(
+  options: RenderOptions,
+  browser = false,
+): Promise<AxeViolation[]> {
   const adapter = findAdapter(options.absolutePath);
+
+  if (browser) {
+    const violations = await runAxeInBrowser(adapter, options);
+    return violations.map(toAxeViolation);
+  }
 
   return withJsdomEnvironment(async () => {
     const { container, cleanup } = adapter.render(options);
     try {
       // color-contrast needs real layout/rendering (canvas, computed
       // paint), which jsdom can't provide; axe-core's own docs recommend
-      // disabling it in jsdom-based test environments.
+      // disabling it in jsdom-based test environments. Browser mode
+      // (above) is the way to check it.
       const results = await axe.run(container, {
         rules: { 'color-contrast': { enabled: false } },
       });
@@ -194,18 +220,22 @@ async function renderAndDetectViolations(options: RenderOptions): Promise<AxeVio
   });
 }
 
-async function detectViolationsInFile(filePath: string): Promise<AxeViolation[]> {
+async function detectViolationsInFile(filePath: string, browser: boolean): Promise<AxeViolation[]> {
   const absolutePath = path.resolve(filePath);
-  return renderAndDetectViolations({ absolutePath });
+  return renderAndDetectViolations({ absolutePath }, browser);
 }
 
 export async function detectViolations(options: DetectOptions): Promise<DetectResult> {
   const files = resolveComponentFiles(options.componentPath);
+  const browser = Boolean(options.browser);
   const violations: AxeViolation[] = [];
 
-  for (const file of files) {
-    violations.push(...(await detectViolationsInFile(file)));
-  }
+  const detectAll = async () => {
+    for (const file of files) {
+      violations.push(...(await detectViolationsInFile(file, browser)));
+    }
+  };
+  await (browser ? withBrowserSession(detectAll) : detectAll());
 
   return { componentPath: options.componentPath, violations };
 }
@@ -213,6 +243,8 @@ export async function detectViolations(options: DetectOptions): Promise<DetectRe
 export interface DetectInSourceOptions {
   source: string;
   filePath: string;
+  /** Same as `DetectOptions.browser`. */
+  browser?: boolean;
 }
 
 /**
@@ -227,6 +259,9 @@ export async function detectViolationsInSource(
   options: DetectInSourceOptions,
 ): Promise<DetectResult> {
   const absolutePath = path.resolve(options.filePath);
-  const violations = await renderAndDetectViolations({ absolutePath, source: options.source });
+  const violations = await renderAndDetectViolations(
+    { absolutePath, source: options.source },
+    Boolean(options.browser),
+  );
   return { componentPath: absolutePath, violations };
 }

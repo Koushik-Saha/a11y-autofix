@@ -12,6 +12,7 @@ import path from 'node:path';
 
 import { detectViolations, resolveComponentFiles } from './detect';
 import type { AxeViolation } from './detect';
+import { withBrowserSession } from './detect/browser';
 import { gatherContext } from './context';
 import type { FixContext } from './context';
 import { generateFix } from './generate';
@@ -22,6 +23,13 @@ import type { VerificationResult } from './verify';
 export interface ScanOptions {
   /** Apply verified fixes directly to their files. Unverified fixes are never applied. */
   write?: boolean;
+  /**
+   * Detect and verify in headless Chromium (via Playwright) instead of
+   * jsdom, which adds `color-contrast` checks. `scan()` rejects with
+   * `BrowserUnavailableError` if Playwright or its Chromium isn't
+   * installed — it never falls back to jsdom.
+   */
+  browser?: boolean;
   /**
    * Called for each verified fix, giving the caller a chance to accept it,
    * reject it, or supply an edited replacement — instead of the blanket
@@ -98,6 +106,12 @@ export interface ScanViolationErrored extends ScanViolationOutcomeBase {
   status: 'errored';
   /** context/generate/verify threw — the pipeline couldn't produce or check a fix for this violation. */
   error: string;
+  /**
+   * Set when generate/ refused to attempt a fix because guessing would be
+   * unsafe (e.g. low contrast over a background image or gradient). Still
+   * unresolved — it needs a human — but nothing went wrong.
+   */
+  reason?: 'not-auto-fixable';
 }
 
 export type ScanViolationResult = ScanViolationFixed | ScanViolationErrored;
@@ -113,13 +127,24 @@ interface Attempt {
   verification: VerificationResult;
 }
 
+/** Options `resolveFix` honours — the subset of `ScanOptions` that affects how a fix is checked. */
+export interface ResolveFixOptions {
+  /** Verify in headless Chromium instead of jsdom. See `ScanOptions.browser`. */
+  browser?: boolean;
+}
+
 async function attemptFix(
   context: FixContext,
   violation: AxeViolation,
+  options: ResolveFixOptions,
   previousAttempt?: PreviousAttempt,
 ): Promise<Attempt> {
   const patch = await generateFix({ context, ...(previousAttempt ? { previousAttempt } : {}) });
-  const verification = await verifyFix({ patch, originalViolation: violation });
+  const verification = await verifyFix({
+    patch,
+    originalViolation: violation,
+    browser: Boolean(options.browser),
+  });
   return { patch, verification };
 }
 
@@ -149,13 +174,14 @@ async function attemptFix(
 export async function resolveFix(
   context: FixContext,
   violation: AxeViolation,
+  options: ResolveFixOptions = {},
 ): Promise<{ patch: ScoredPatch; verification: VerificationResult }> {
-  const first = await attemptFix(context, violation);
+  const first = await attemptFix(context, violation, options);
   if (first.verification.status === 'verified') {
     return { patch: { ...first.patch, confidence: 'high' }, verification: first.verification };
   }
 
-  const retry = await attemptFix(context, violation, {
+  const retry = await attemptFix(context, violation, options, {
     newSnippet: first.patch.newSnippet,
     remainingViolations: first.verification.remainingViolations,
     newViolations: first.verification.newViolations,
@@ -240,6 +266,7 @@ async function runInteractiveDecision(
     const editedVerification = await verifyFix({
       patch: editedPatch,
       originalViolation: violation,
+      browser: Boolean(options.browser),
     });
 
     if (editedVerification.status === 'verified') {
@@ -265,13 +292,16 @@ async function runInteractiveDecision(
 }
 
 async function scanFile(file: string, options: ScanOptions): Promise<ScanViolationResult[]> {
-  const { violations } = await detectViolations({ componentPath: file });
+  const { violations } = await detectViolations({
+    componentPath: file,
+    browser: Boolean(options.browser),
+  });
   const results: ScanViolationResult[] = [];
 
   for (const violation of violations) {
     try {
       const context = await gatherContext({ violation, componentPath: file });
-      const resolved = await resolveFix(context, violation);
+      const resolved = await resolveFix(context, violation, options);
 
       let patch = resolved.patch;
       let verification = resolved.verification;
@@ -309,6 +339,11 @@ async function scanFile(file: string, options: ScanOptions): Promise<ScanViolati
         filePath: file,
         violation,
         error: (error as Error).message,
+        // By name rather than instanceof generate/'s NotAutoFixableError, so
+        // it holds even when generate/ is loaded twice or mocked.
+        ...((error as Error)?.name === 'NotAutoFixableError'
+          ? { reason: 'not-auto-fixable' as const }
+          : {}),
       });
     }
   }
@@ -323,15 +358,23 @@ async function scanFile(file: string, options: ScanOptions): Promise<ScanViolati
  * `targetPath` doesn't exist; per-violation failures (an unfixable JSX
  * node, a Claude API error, a bad patch) are captured as
  * `status: 'errored'` entries rather than aborting the whole scan.
+ *
+ * With `options.browser`, one headless Chromium is launched up front and
+ * shared by every detect/verify render in the scan; if it can't be
+ * launched, this rejects with `BrowserUnavailableError` before scanning
+ * anything.
  */
 export async function scan(targetPath: string, options: ScanOptions = {}): Promise<ScanResult> {
   const absoluteTarget = path.resolve(targetPath);
   const files = resolveComponentFiles(absoluteTarget);
 
   const violations: ScanViolationResult[] = [];
-  for (const file of files) {
-    violations.push(...(await scanFile(file, options)));
-  }
+  const scanAll = async () => {
+    for (const file of files) {
+      violations.push(...(await scanFile(file, options)));
+    }
+  };
+  await (options.browser ? withBrowserSession(scanAll) : scanAll());
 
   return { targetPath: absoluteTarget, filesScanned: files.length, violations };
 }

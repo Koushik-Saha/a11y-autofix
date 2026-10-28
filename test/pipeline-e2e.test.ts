@@ -155,15 +155,18 @@ describe('pipeline end-to-end across the 10 target violation types, in both Reac
     },
   );
 
-  it('color-contrast is not detectable through this pipeline (documented gap, not a bug)', async () => {
-    const componentPath = fixture('LowContrastText.tsx');
-    const { violations } = await detectViolations({ componentPath });
+  it.each(['LowContrastText.tsx', 'VueLowContrastText.vue'])(
+    'color-contrast is not detectable in jsdom mode (documented gap, not a bug): %s',
+    async (fixtureName) => {
+      const componentPath = fixture(fixtureName);
+      const { violations } = await detectViolations({ componentPath });
 
-    // detect/ explicitly disables axe-core's color-contrast rule because
-    // jsdom has no real canvas/paint implementation to measure against.
-    // This assertion makes that gap visible in the test suite rather than
-    // silently rediscovered later — see PLAN.md and the fixture's own
-    // doc comment.
-    expect(violations.find((v) => v.id === 'color-contrast')).toBeUndefined();
-  });
+      // detect/ explicitly disables axe-core's color-contrast rule in jsdom
+      // mode because jsdom has no real canvas/paint implementation to
+      // measure against. This assertion keeps that gap visible in the test
+      // suite; browser mode (`--browser`) does detect it — see
+      // test/browser-detect.test.ts, PLAN.md, and the fixture's doc comment.
+      expect(violations.find((v) => v.id === 'color-contrast')).toBeUndefined();
+    },
+  );
 });
