@@ -11,7 +11,7 @@
  * full file text first, then slices out the (now-fixed) line range —
  * exactly what ends up on disk with `--write`, just not written anywhere.
  *
- * Deliberately duplicates (not imports) the same replace-exactly-once
+ * Deliberately duplicates (not imports) the same patch-application
  * logic `src/verify/index.ts`'s `applyPatchToSource` uses, so this
  * directory has no dependency on a prior `npm run build` of the main
  * package to test or run — see the module boundary note in action.yml.
@@ -30,24 +30,50 @@ function countOccurrences(haystack, needle) {
 }
 
 /**
+ * @typedef {{start: number, end: number}} SourceRange
+ * @typedef {{oldSnippet: string, newSnippet: string, position?: SourceRange}} PatchLike
+ */
+
+/**
+ * With `patch.position` (scans from versions that record it), replaces
+ * exactly that range — so two identical elements in one file each get
+ * their own suggestion — after checking it still holds `oldSnippet`.
+ * Without it (older results), `oldSnippet` must occur exactly once.
+ *
  * @param {string} source full file text
- * @param {{oldSnippet: string, newSnippet: string}} patch
- * @returns {string} `source` with `oldSnippet` replaced by `newSnippet`
- * @throws if `oldSnippet` doesn't occur in `source` exactly once
+ * @param {PatchLike} patch
+ * @returns {string} `source` with the patched element replaced by `newSnippet`
+ * @throws if the text at `position` isn't `oldSnippet` (the file changed
+ *   since the scan), or, without `position`, if `oldSnippet` doesn't occur
+ *   exactly once
  */
 function applyPatch(source, patch) {
+  if (patch.position) {
+    const { start, end } = patch.position;
+    const valid =
+      Number.isInteger(start) &&
+      Number.isInteger(end) &&
+      start >= 0 &&
+      start <= end &&
+      end <= source.length;
+    if (!valid || source.slice(start, end) !== patch.oldSnippet) {
+      throw new Error('File changed since scan: oldSnippet is no longer at its recorded position');
+    }
+    return source.slice(0, start) + patch.newSnippet + source.slice(end);
+  }
+
   const occurrences = countOccurrences(source, patch.oldSnippet);
   if (occurrences !== 1) {
     throw new Error(
       `Expected oldSnippet to appear exactly once in the source, found ${occurrences}`,
     );
   }
-  return source.replace(patch.oldSnippet, patch.newSnippet);
+  return source.replace(patch.oldSnippet, () => patch.newSnippet);
 }
 
 /**
  * @param {string} fileContent the file's current (unpatched) full text
- * @param {{oldSnippet: string, newSnippet: string}} patch
+ * @param {PatchLike} patch
  * @param {number} startLine 1-indexed
  * @param {number} endLine 1-indexed, inclusive
  * @returns {string} the fixed line range's text, suitable for a ```suggestion block

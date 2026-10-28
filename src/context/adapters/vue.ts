@@ -32,6 +32,8 @@ import type {
   FrameworkElementContext,
   GatherElementContextOptions,
   JsxElementSnapshot,
+  LocateElementsOptions,
+  SourceRange,
 } from './types';
 
 const VUE_EXTENSIONS = new Set(['.vue']);
@@ -110,9 +112,15 @@ function locateElement(root: RootNode, node: AxeNodeResult): WalkEntry {
   }
 
   if (parentSegment?.tagName) {
-    candidates = candidates.filter((entry) =>
-      entry.parent ? entry.parent.tag.toLowerCase() === parentSegment.tagName : false,
-    );
+    candidates = candidates.filter((entry) => {
+      const parent = entry.parent;
+      if (!parent || parent.tag.toLowerCase() !== parentSegment.tagName) return false;
+      if (parentSegment.nthChild === null) return true;
+      // e.g. "section:nth-child(2) > img": two identical <img>s in two
+      // identical <section>s differ only by their parent's position.
+      const parentEntry = allEntries.find((other) => other.node === parent);
+      return parentEntry ? getSiblingIndex(parentEntry, root) === parentSegment.nthChild : false;
+    });
   }
 
   if (candidates.length === 0) {
@@ -155,6 +163,8 @@ function toSnapshot(node: ElementNode, filePath: string, sourceText: string): Js
       startColumn: node.loc.start.column,
       endLine: node.loc.end.line,
       endColumn: node.loc.end.column,
+      startOffset: node.loc.start.offset,
+      endOffset: node.loc.end.offset,
     },
   };
 }
@@ -188,16 +198,20 @@ function extractPropTypes(scriptSetupContent: string | undefined): string | null
   return null;
 }
 
-function gatherElementContext(options: GatherElementContextOptions): FrameworkElementContext {
-  const { componentPath, violationNode } = options;
-
-  const sourceText = readFileSync(componentPath, 'utf8');
+function parseTemplate(componentPath: string, sourceText: string) {
   const { descriptor } = parseSfc(sourceText, { filename: componentPath });
-
   const root = descriptor.template?.ast;
   if (!root) {
     throw new Error(`"${componentPath}" has no parseable <template> block to locate elements in`);
   }
+  return { descriptor, root };
+}
+
+function gatherElementContext(options: GatherElementContextOptions): FrameworkElementContext {
+  const { componentPath, violationNode } = options;
+
+  const sourceText = readFileSync(componentPath, 'utf8');
+  const { descriptor, root } = parseTemplate(componentPath, sourceText);
 
   const { node: element, parent } = locateElement(root, violationNode);
   const siblings = elementChildrenOf(parent ?? root).filter((sibling) => sibling !== element);
@@ -211,10 +225,28 @@ function gatherElementContext(options: GatherElementContextOptions): FrameworkEl
   };
 }
 
+function locateElements(options: LocateElementsOptions): (SourceRange | null)[] {
+  let root: RootNode;
+  try {
+    ({ root } = parseTemplate(options.componentPath, options.source));
+  } catch {
+    return options.nodes.map(() => null);
+  }
+  return options.nodes.map((node) => {
+    try {
+      const { loc } = locateElement(root, node).node;
+      return { start: loc.start.offset, end: loc.end.offset };
+    } catch {
+      return null;
+    }
+  });
+}
+
 export const vueAdapter: FrameworkAdapter = {
   id: 'vue',
   supports(componentPath: string): boolean {
     return VUE_EXTENSIONS.has(path.extname(componentPath));
   },
   gatherElementContext,
+  locateElements,
 };

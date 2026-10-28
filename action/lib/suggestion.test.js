@@ -14,9 +14,63 @@ describe('applyPatch', () => {
     expect(() => applyPatch('abc', { oldSnippet: 'zzz', newSnippet: 'y' })).toThrow();
     expect(() => applyPatch('abcabc', { oldSnippet: 'abc', newSnippet: 'x' })).toThrow();
   });
+
+  it('with a position, replaces that occurrence even when the snippet repeats', () => {
+    const source = '<img />\n<img />\n';
+    const patch = {
+      oldSnippet: '<img />',
+      newSnippet: '<img alt="b" />',
+      position: { start: 8, end: 15 },
+    };
+
+    expect(applyPatch(source, patch)).toBe('<img />\n<img alt="b" />\n');
+  });
+
+  it('with a position, throws when the file changed since the scan', () => {
+    const patch = {
+      oldSnippet: '<img />',
+      newSnippet: '<img alt="b" />',
+      position: { start: 8, end: 15 },
+    };
+
+    expect(() => applyPatch('// edited\n<img />\n<img />\n', patch)).toThrow(
+      /File changed since scan/,
+    );
+    expect(() => applyPatch('<img />', patch)).toThrow(/File changed since scan/);
+  });
+
+  it('inserts newSnippet literally, even with "$&"-style sequences', () => {
+    const patch = { oldSnippet: '<img />', newSnippet: '<img alt="$&" />' };
+
+    expect(applyPatch('a <img /> b', patch)).toBe('a <img alt="$&" /> b');
+  });
 });
 
 describe('buildSuggestionBody', () => {
+  it("builds each of two identical elements' suggestions from its own position", () => {
+    const fileContent = [
+      '<div>',
+      '  <img src="x.jpg" />',
+      '  <img src="x.jpg" />',
+      '</div>',
+      '',
+    ].join('\n');
+    const oldSnippet = '<img src="x.jpg" />';
+    const newSnippet = '<img src="x.jpg" alt="A photo" />';
+    const first = fileContent.indexOf(oldSnippet);
+    const second = fileContent.indexOf(oldSnippet, first + 1);
+
+    const at = (start) => ({
+      oldSnippet,
+      newSnippet,
+      position: { start, end: start + oldSnippet.length },
+    });
+
+    expect(buildSuggestionBody(fileContent, at(first), 2, 2)).toBe(`  ${newSnippet}`);
+    expect(buildSuggestionBody(fileContent, at(second), 3, 3)).toBe(`  ${newSnippet}`);
+    expect(applyPatch(fileContent, at(second)).split('\n')[1]).toBe(`  ${oldSnippet}`);
+  });
+
   it('reproduces a single-line fix exactly', () => {
     const fileContent = [
       'import React from "react";',

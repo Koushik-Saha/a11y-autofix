@@ -22,8 +22,8 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
 3. **generate/** — Sends the `FixContext` to the Claude API, constrained via
    structured output to return only a replacement for the single located
    JSX element. Produces a `Patch` (`filePath`, `violationId`, `oldSnippet`
-   — owned by `context/`'s AST extraction, not generated — and
-   `newSnippet`). Output is _unverified_ at this stage.
+   and `position` — both owned by `context/`'s AST extraction, not
+   generated — and `newSnippet`). Output is _unverified_ at this stage.
 4. **verify/** — Applies the `Patch` in memory (the file on disk is never
    touched), re-runs `detect/` against both the original and patched source,
    and confirms: (a) the original violation is gone, (b) no new violations
@@ -983,6 +983,41 @@ node_modules/**`; also added a `packages/*/scripts/**/*.js` block
       diff check on the patch; the real-model prompt hasn't been exercised
       yet (no API key in this environment — the tests mock `generateFix`).
 
+- [x] Position-aware patches (2026-10-28): `Patch` gained an optional
+      `position: { start, end }` — character offsets into the file text
+      exactly as `readFileSync` returns it, from new
+      `JsxSourceLocation.startOffset`/`endOffset` (ts-morph node
+      start/end, shifted by one when TypeScript drops a leading BOM; Vue's
+      `loc.*.offset`). `applyPatchToSource` replaces that range after
+      checking it still holds `oldSnippet`; if not it throws
+      `StalePatchError` ("file changed since scan … Re-run scan") instead
+      of patching whatever is there now. No `position` (older saved
+      results) → the old exact-once string match. Three things had to
+      change beyond applying, or duplicates still couldn't be fixed:
+      (1) scan/ fixed only `violation.nodes[0]` per rule, silently
+      dropping every other element; it now splits each rule's nodes into
+      one entry per _source_ element (nodes one JSX element renders
+      several times, e.g. via `.map()`, stay one entry/patch);
+      (2) verify/ called any remaining node of the rule a failure, so
+      fixing one of two identical `<img>`s could never verify; with a
+      position it now locates each post-patch node (`locateElements`, the
+      same structural matching run on in-memory source) and only counts
+      nodes inside the patched range or new instances — other elements
+      already failing before are left to their own patches. Unlocatable
+      nodes still count, so this can't verify more than before;
+      (3) the locators ignored the parent segment's `:nth-child`, so
+      `section:nth-child(2) > img` was ambiguous. scan/ also now detects
+      against the exact text it read and refuses (stale) once the file
+      differs from that plus its own writes — otherwise later entries were
+      re-located with old selectors in an edited file. The Action's
+      duplicated `applyPatch` mirrors the position logic; both now insert
+      `newSnippet` literally (`String.replace` was expanding `$&`).
+      Corrections log: unaffected — its entries never stored a `Patch`
+      and nothing reads them back. **Limitations:** the VS Code extension
+      still diagnoses/fixes only the first node per rule; the CLI's
+      `[violation]` line doesn't show a line number, so two duplicates
+      print identically until their diffs.
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal
@@ -1011,6 +1046,9 @@ node_modules/**`; also added a `packages/*/scripts/**/*.js` block
   (`applyPatchToSource`). A component with two structurally-identical
   offending elements (rare, but possible) would still need position-aware
   replacement instead of a plain string match — not implemented.
+  _Update 2026-10-28:_ resolved — patches carry `position` and are
+  applied by offset; see the "Position-aware patches" Done entry. Patches
+  without one still use the exact-once match.
 - `detectViolations` still returns one flat, file-unattributed violation
   list for a directory target (see `cli/`'s Done entry above, which works
   around this by having `cli/` resolve files itself and call

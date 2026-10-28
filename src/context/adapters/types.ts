@@ -16,6 +16,23 @@ export interface JsxSourceLocation {
   startColumn: number;
   endLine: number;
   endColumn: number;
+  /**
+   * 0-based offset of the element's first character in the file's text
+   * exactly as `fs.readFileSync(path, 'utf8')` returns it (a leading BOM
+   * counts as one character) — so `text.slice(startOffset, endOffset)`
+   * is the element's `code`. This is what a Patch records as its
+   * `position`, which verify/ uses to patch this element and not an
+   * identical one elsewhere in the file.
+   */
+  startOffset: number;
+  /** 0-based offset just past the element's last character (exclusive). */
+  endOffset: number;
+}
+
+/** A half-open `[start, end)` range of character offsets into a file's text. */
+export interface SourceRange {
+  start: number;
+  end: number;
 }
 
 /**
@@ -61,4 +78,19 @@ export interface FrameworkAdapter {
   /** Whether this adapter knows how to parse `componentPath`, typically decided by file extension. */
   supports(componentPath: string): boolean;
   gatherElementContext(options: GatherElementContextOptions): FrameworkElementContext;
+  /**
+   * Locates each axe-core node's element in `source` (text supplied by
+   * the caller, not read from disk — verify/ uses this on patched source
+   * that only exists in memory) with the same structural matching as
+   * `gatherElementContext`. An entry is null when that node can't be
+   * located unambiguously; this never throws for a single bad node.
+   */
+  locateElements(options: LocateElementsOptions): (SourceRange | null)[];
+}
+
+export interface LocateElementsOptions {
+  /** Absolute path the source belongs to — used for parsing (file type) and error messages only. */
+  componentPath: string;
+  source: string;
+  nodes: AxeNodeResult[];
 }

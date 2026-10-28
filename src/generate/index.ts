@@ -9,7 +9,7 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
 
 import type { AxeViolation } from '../detect';
-import type { FixContext } from '../context';
+import type { FixContext, SourceRange } from '../context';
 
 import {
   buildContrastSection,
@@ -35,8 +35,19 @@ export class NotAutoFixableError extends Error {
 export interface Patch {
   filePath: string;
   violationId: string;
+  /** The element's exact source text when scanned. With `position`, a check that the file hasn't changed; without it, how the element is found. */
   oldSnippet: string;
   newSnippet: string;
+  /**
+   * Where `oldSnippet` sat in the file when it was scanned: character
+   * offsets from context/'s AST (`element.location.startOffset` /
+   * `endOffset`). verify/'s `applyPatchToSource` replaces exactly this
+   * range, so a file with two identical offending elements can have each
+   * fixed separately. Optional only for patches from before it existed
+   * (e.g. a saved `--json` result), which fall back to requiring
+   * `oldSnippet` to occur exactly once.
+   */
+  position?: SourceRange;
 }
 
 /**
@@ -212,5 +223,9 @@ export async function generateFix(options: GenerateFixOptions): Promise<Patch> {
     violationId: context.violation.id,
     oldSnippet: context.element.code,
     newSnippet: response.parsed_output.newSnippet,
+    position: {
+      start: context.element.location.startOffset,
+      end: context.element.location.endOffset,
+    },
   };
 }
