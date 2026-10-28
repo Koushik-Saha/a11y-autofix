@@ -2,7 +2,9 @@
  * adapters/react.ts — the `RenderAdapter` for React (`.tsx`/`.jsx`).
  * Compiles a component (plus its local imports) to a self-contained
  * CommonJS module via esbuild, then mounts it with
- * `@testing-library/react`.
+ * `@testing-library/react`. For detect/'s real-browser path it bundles the
+ * same component for the browser instead and mounts it with
+ * `react-dom/client` (see `bundleReactForBrowser`).
  */
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -13,6 +15,12 @@ import { buildSync } from 'esbuild';
 import * as React from 'react';
 import { cleanup, render } from '@testing-library/react';
 
+import {
+  COMPONENT_MODULE_ID,
+  MOUNT_EPILOGUE,
+  MOUNT_PRELUDE,
+  bundleForBrowser,
+} from './browser-bundle';
 import type { RenderAdapter, RenderOptions, RenderResult } from './types';
 
 const REACT_EXTENSIONS = new Set(['.tsx', '.jsx']);
@@ -93,10 +101,42 @@ function renderReact(options: RenderOptions): RenderResult {
   return { container, cleanup };
 }
 
+// Mirrors `resolveDefaultExport` above. `flushSync` makes the first render
+// synchronous, so the DOM is complete before axe-core runs. React 19
+// reports uncaught render errors via `onUncaughtError` instead of
+// throwing, so that hook is what records a failed mount.
+const REACT_MOUNT_SOURCE = `
+import * as React from 'react';
+import { flushSync } from 'react-dom';
+import { createRoot } from 'react-dom/client';
+import * as componentModule from '${COMPONENT_MODULE_ID}';
+${MOUNT_PRELUDE}
+try {
+  const Component = componentModule.default ?? componentModule;
+  if (typeof Component !== 'function') {
+    throw new Error('Component file must have a default export that is a React component');
+  }
+  const root = createRoot(container, { onUncaughtError: recordMountError });
+  flushSync(() => root.render(React.createElement(Component)));
+} catch (error) {
+  recordMountError(error);
+}
+${MOUNT_EPILOGUE}
+`;
+
+function bundleReactForBrowser(options: RenderOptions): Promise<string> {
+  return bundleForBrowser({
+    render: options,
+    mountSource: REACT_MOUNT_SOURCE,
+    componentLoader: loaderForPath(options.absolutePath),
+  });
+}
+
 export const reactRenderAdapter: RenderAdapter = {
   id: 'react',
   supports(componentPath: string): boolean {
     return REACT_EXTENSIONS.has(path.extname(componentPath));
   },
   render: renderReact,
+  bundleForBrowser: bundleReactForBrowser,
 };

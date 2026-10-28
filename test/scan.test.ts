@@ -159,7 +159,24 @@ describe('scan', () => {
     expect(entry.status).toBe('errored');
     if (entry.status !== 'errored') throw new Error('expected an errored result');
     expect(entry.error).toContain('Claude API unavailable');
+    expect(entry.reason).toBeUndefined();
     // A thrown error isn't a failed verification, so it doesn't get retried.
+    expect(generateFix).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a not-auto-fixable refusal from generate/ as such, unresolved and not retried', async () => {
+    vi.mocked(generateFix).mockRejectedValue(
+      Object.assign(new Error('Not auto-fixable: text sits on a gradient'), {
+        name: 'NotAutoFixableError',
+      }),
+    );
+
+    const result = await scan(componentPath);
+
+    const entry = result.violations[0]!;
+    if (entry.status !== 'errored') throw new Error('expected an errored result');
+    expect(entry.reason).toBe('not-auto-fixable');
+    expect(entry.error).toContain('Not auto-fixable');
     expect(generateFix).toHaveBeenCalledTimes(1);
   });
 

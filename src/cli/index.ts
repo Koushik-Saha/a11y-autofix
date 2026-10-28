@@ -20,6 +20,7 @@ import { appendCorrection } from './corrections-log';
 import { createInteractiveHandler } from './interactive';
 import type { InteractiveHandler } from './interactive';
 import type { AxeViolation } from '../detect';
+import { BrowserUnavailableError } from '../detect';
 import type { Patch } from '../generate';
 import type { PatchConfidence, ScanOptions, ScanResult, ScanViolationResult } from '../scan';
 import { scan } from '../scan';
@@ -88,7 +89,8 @@ function printViolationResult(entry: ScanViolationResult): void {
   printViolationHeader(entry.violation);
 
   if (entry.status === 'errored') {
-    console.log(`  [error] ${entry.error}`);
+    const label = entry.reason === 'not-auto-fixable' ? 'not auto-fixable' : 'error';
+    console.log(`  [${label}] ${entry.error}`);
     return;
   }
 
@@ -208,6 +210,8 @@ export async function runScan(
     } catch (error) {
       if (json) {
         console.error(JSON.stringify({ error: (error as Error).message }));
+      } else if (error instanceof BrowserUnavailableError) {
+        console.error(error.message);
       } else {
         console.error(`Could not read path "${targetPath}": ${(error as Error).message}`);
       }
@@ -256,6 +260,10 @@ function main(): void {
       'apply verified fixes directly to files (unverified fixes are never applied)',
     )
     .option('--json', 'print the full scan result as JSON instead of a human-readable diff')
+    .option(
+      '--browser',
+      'render in headless Chromium (via Playwright) instead of jsdom, so color-contrast is checked too — needs `npm i -D playwright && npx playwright install chromium`',
+    )
     .option(
       '--interactive',
       'review each verified fix before applying it: accept, reject, or edit (without --write, this only reviews — nothing is ever written)',

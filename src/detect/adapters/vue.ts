@@ -35,18 +35,26 @@ import { compileScript, compileTemplate, parse as parseSfc } from '@vue/compiler
 import { buildSync } from 'esbuild';
 import type { Component } from 'vue';
 
+import {
+  COMPONENT_MODULE_ID,
+  MOUNT_EPILOGUE,
+  MOUNT_PRELUDE,
+  bundleForBrowser,
+} from './browser-bundle';
 import type { RenderAdapter, RenderOptions, RenderResult } from './types';
 
 const VUE_EXTENSIONS = new Set(['.vue']);
 
 /**
- * Compiles an SFC's script + template into one CommonJS module's source
- * text: `const __sfc__ = { ...compiled script... }; __sfc__.render =
- * ...compiled template...; module.exports = __sfc__;` — the same shape
- * vue-loader/@vitejs/plugin-vue assemble at build time, just produced by
- * hand since we're not running inside either of those build tools.
+ * Compiles an SFC's script + template into one module's source text:
+ * `const __sfc__ = { ...compiled script... }; __sfc__.render =
+ * ...compiled template...;` — the same shape vue-loader/@vitejs/plugin-vue
+ * assemble at build time, just produced by hand since we're not running
+ * inside either of those build tools. `exportStatement` finishes it off:
+ * `module.exports = __sfc__;` for the jsdom path (bundled to CommonJS and
+ * `require`d), `export default __sfc__;` for the browser bundle.
  */
-function compileVueModuleSource(options: RenderOptions): string {
+function compileVueModuleSource(options: RenderOptions, exportStatement: string): string {
   const { absolutePath, source } = options;
   const sourceText = source ?? readFileSync(absolutePath, 'utf8');
   const { descriptor } = parseSfc(sourceText, { filename: absolutePath });
@@ -93,17 +101,14 @@ function compileVueModuleSource(options: RenderOptions): string {
     'function render',
   );
 
-  return [
-    scriptModuleText,
-    templateModuleText,
-    '__sfc__.render = render;',
-    'module.exports = __sfc__;',
-  ].join('\n');
+  return [scriptModuleText, templateModuleText, '__sfc__.render = render;', exportStatement].join(
+    '\n',
+  );
 }
 
 function loadVueComponentModule(options: RenderOptions): unknown {
   const { absolutePath } = options;
-  const assembled = compileVueModuleSource(options);
+  const assembled = compileVueModuleSource(options, 'module.exports = __sfc__;');
 
   const result = buildSync({
     stdin: {
@@ -178,10 +183,46 @@ function renderVue(options: RenderOptions): RenderResult {
   };
 }
 
+// Browser counterpart of `renderVue`. The compiled template and this entry
+// both import from 'vue', so the bundle holds a single Vue copy (no
+// requireFreshVue workaround needed: each page load is a fresh realm).
+// errorHandler is what records a failed mount — without it, Vue's
+// production build only logs render errors to the console.
+const VUE_MOUNT_SOURCE = `
+import { createApp } from 'vue';
+import Component from '${COMPONENT_MODULE_ID}';
+${MOUNT_PRELUDE}
+try {
+  const app = createApp(Component);
+  app.config.warnHandler = () => {};
+  app.config.errorHandler = recordMountError;
+  app.mount(container);
+} catch (error) {
+  recordMountError(error);
+}
+${MOUNT_EPILOGUE}
+`;
+
+function bundleVueForBrowser(options: RenderOptions): Promise<string> {
+  return bundleForBrowser({
+    render: options,
+    mountSource: VUE_MOUNT_SOURCE,
+    componentContents: compileVueModuleSource(options, 'export default __sfc__;'),
+    componentLoader: 'ts',
+    // Compile-time flags Vue's esm-bundler build expects a bundler to set.
+    define: {
+      __VUE_OPTIONS_API__: 'true',
+      __VUE_PROD_DEVTOOLS__: 'false',
+      __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false',
+    },
+  });
+}
+
 export const vueRenderAdapter: RenderAdapter = {
   id: 'vue',
   supports(componentPath: string): boolean {
     return VUE_EXTENSIONS.has(path.extname(componentPath));
   },
   render: renderVue,
+  bundleForBrowser: bundleVueForBrowser,
 };

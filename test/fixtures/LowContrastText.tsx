@@ -2,11 +2,12 @@ import * as React from 'react';
 
 /**
  * Intentionally low-contrast text (light gray on white, ~1.6:1 — WCAG AA
- * requires 4.5:1 for normal text). NOT currently detectable through this
- * pipeline: detect/ disables axe-core's `color-contrast` rule because it
- * needs a real canvas/paint implementation that jsdom can't provide (see
- * PLAN.md). This fixture exists to make that limitation concrete and
- * testable rather than implicit — see test/pipeline-e2e.test.ts.
+ * requires 4.5:1 for normal text). Detected only in browser mode
+ * (`scan --browser`): the default jsdom mode disables axe-core's
+ * `color-contrast` rule because jsdom has no layout/paint to measure
+ * against (see PLAN.md). test/pipeline-e2e.test.ts pins the jsdom
+ * behavior; test/browser-detect.test.ts covers detection and a verified
+ * fix in browser mode.
  */
 export default function LowContrastText() {
   return (
