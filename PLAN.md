@@ -1155,6 +1155,15 @@ is a concrete, cheap prompt-tightening candidate: for `link-name` (and
 arguably `button-name` when the button isn't icon-only), prefer adding
 real child text over `aria-label` when the fix allows it.
 
+_Applied 2026-10-28:_ `SYSTEM_PROMPT` now says that for a link, or a
+button that isn't icon-only, the fix should prefer real visible child
+text over an `aria-label`, because an aria-label-only link or button
+passes axe-core but shows sighted users nothing; `aria-label` stays
+acceptable for genuinely icon-only controls. verify/ can't enforce this —
+axe-core verifies both shapes equally — so the prompt is the only lever;
+`test/generate-prompt.test.ts` asserts the instruction is sent and pins
+that both shapes verify on `MissingLinkName.tsx`.
+
 **5. `landmark-unique` — different failure shape than the other four, and
 the prompt doesn't say so.** This is the only one of the 5 that's
 _relational_: the violation exists because of a pair of elements (two
@@ -1171,12 +1180,21 @@ assumes both landmarks change together, which the architecture doesn't
 support. A one-line addition covering relational rules would remove that
 ambiguity rather than leaving it to be inferred.
 
+_Applied 2026-10-28:_ `SYSTEM_PROMPT` now names relational rules (with
+`landmark-unique` as the example) and states that fixing only the flagged
+element is sufficient and expected: don't change the sibling, and don't
+write a replacement that assumes it changes. `test/generate-prompt.test.ts`
+asserts the instruction is sent, and that renaming only the flagged
+`<nav>` in `DuplicateLandmarks.tsx` verifies with the other left untouched.
+
 **If tightening the prompt from these findings:** items 2 and 5 are the
 sharpest (structural, not just wording) and worth prioritizing; item 4 is
 a small, low-risk addition; item 3 needs a `context/` change more than a
 `generate/` one; item 1 isn't a `generate/` issue at all. None of this has
 been applied to `SYSTEM_PROMPT` yet — reported for a decision, not acted
-on unprompted.
+on unprompted. _Update 2026-10-28:_ items 4 and 5 are now applied (see
+their notes); 2 and 3 remain open decisions. Still unchecked against the
+real model — no API key here.
 
 ## Next violation types — WebAIM Million cross-reference (2026-08-10)
 
