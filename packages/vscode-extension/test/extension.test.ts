@@ -51,7 +51,14 @@ describe('activate', () => {
   it('rescans and updates the diagnostic collection when a document is saved', async () => {
     detectViolations.mockResolvedValue({
       violations: [
-        { id: 'image-alt', impact: 'critical', help: 'x', helpUrl: 'https://x', nodes: [] },
+        {
+          filePath: '/repo/Avatar.tsx',
+          id: 'image-alt',
+          impact: 'critical',
+          help: 'x',
+          helpUrl: 'https://x',
+          nodes: [],
+        },
       ],
     });
     gatherContext.mockResolvedValue({

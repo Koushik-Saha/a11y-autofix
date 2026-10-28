@@ -10,8 +10,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { detectViolationsInSource, resolveComponentFiles } from './detect';
-import type { AxeNodeResult, AxeViolation } from './detect';
+import { detectViolations } from './detect';
+import type { AxeNodeResult, AxeViolation, DetectedFile } from './detect';
 import { withBrowserSession } from './detect/browser';
 import { gatherContext, locateElements } from './context';
 import type { FixContext } from './context';
@@ -346,15 +346,19 @@ function assertUnchangedSinceScan(file: string, ruleId: string, expectedSource: 
   }
 }
 
-async function scanFile(file: string, options: ScanOptions): Promise<ScanViolationResult[]> {
-  // Detect against exactly this text, so each later step can tell whether
-  // the file is still what was scanned (plus this scan's own writes).
-  let expectedSource = readFileSync(file, 'utf8');
-  const { violations } = await detectViolationsInSource({
-    source: expectedSource,
-    filePath: file,
-    browser: Boolean(options.browser),
-  });
+/**
+ * Runs context -> generate -> verify (and any write) for one file's
+ * violations. `detected.source` is the exact text detect/ rendered, so
+ * each later step can tell whether the file is still what was scanned
+ * (plus this scan's own writes).
+ */
+async function fixFile(
+  detected: DetectedFile,
+  violations: AxeViolation[],
+  options: ScanOptions,
+): Promise<ScanViolationResult[]> {
+  const file = detected.filePath;
+  let expectedSource = detected.source;
   const results: ScanViolationResult[] = [];
 
   for (const ruleViolation of violations) {
@@ -431,15 +435,26 @@ async function scanFile(file: string, options: ScanOptions): Promise<ScanViolati
  */
 export async function scan(targetPath: string, options: ScanOptions = {}): Promise<ScanResult> {
   const absoluteTarget = path.resolve(targetPath);
-  const files = resolveComponentFiles(absoluteTarget);
 
   const violations: ScanViolationResult[] = [];
+  let filesScanned = 0;
   const scanAll = async () => {
-    for (const file of files) {
-      violations.push(...(await scanFile(file, options)));
+    // One detect pass over the whole target (every file is rendered before
+    // any fix is generated); its violations are already attributed to
+    // their files.
+    const detected = await detectViolations({
+      componentPath: absoluteTarget,
+      browser: Boolean(options.browser),
+    });
+    filesScanned = detected.files.length;
+    for (const file of detected.files) {
+      const fileViolations = detected.violations.filter(
+        (violation) => violation.filePath === file.filePath,
+      );
+      violations.push(...(await fixFile(file, fileViolations, options)));
     }
   };
   await (options.browser ? withBrowserSession(scanAll) : scanAll());
 
-  return { targetPath: absoluteTarget, filesScanned: files.length, violations };
+  return { targetPath: absoluteTarget, filesScanned, violations };
 }

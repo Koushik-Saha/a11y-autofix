@@ -20,7 +20,7 @@
  *    full default ruleset, including `color-contrast`.
  */
 
-import { readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 import type { Result as AxeResult, NodeResult as AxeApiNodeResult } from 'axe-core';
@@ -39,6 +39,12 @@ export interface AxeNodeResult {
 }
 
 export interface AxeViolation {
+  /**
+   * Absolute path of the component file the violation was found in — set
+   * for single-file and directory targets alike, so results from a
+   * directory scan can be attributed without re-scanning file by file.
+   */
+  filePath: string;
   id: string;
   impact: 'minor' | 'moderate' | 'serious' | 'critical' | null;
   description: string;
@@ -60,8 +66,22 @@ export interface DetectOptions {
   browser?: boolean;
 }
 
+export interface DetectedFile {
+  /** Absolute path, matching `AxeViolation.filePath`. */
+  filePath: string;
+  /**
+   * The exact text that was rendered and checked. Violation selectors
+   * refer to this text; a caller that later edits the file (scan/'s
+   * `--write`) compares against it to notice changes made by anyone else.
+   */
+  source: string;
+}
+
 export interface DetectResult {
   componentPath: string;
+  /** Every component file rendered — including those with no violations — in scan order. */
+  files: DetectedFile[];
+  /** Violations from all of `files`, each tagged with its `filePath`. */
   violations: AxeViolation[];
 }
 
@@ -88,10 +108,9 @@ function isComponentFile(fileName: string): boolean {
 /**
  * Lists the component file(s) at `componentPath` — itself if it's a file,
  * or every non-test file directly inside it (of a type some registered
- * adapter supports) if it's a directory (non-recursive). Exported so cli/
- * can resolve a scan target into individual files and run the full
- * per-violation pipeline (which needs a specific file, not a directory)
- * against each one.
+ * adapter supports) if it's a directory (non-recursive). This is the
+ * file list `detectViolations` renders; exported for callers that want it
+ * without rendering anything.
  */
 export function resolveComponentFiles(componentPath: string): string[] {
   const stats = statSync(componentPath);
@@ -181,8 +200,9 @@ function toAxeNodeResult(node: AxeApiNodeResult): AxeNodeResult {
   return result;
 }
 
-function toAxeViolation(violation: AxeResult): AxeViolation {
+function toAxeViolation(violation: AxeResult, filePath: string): AxeViolation {
   return {
+    filePath,
     id: violation.id,
     impact: (violation.impact ?? null) as AxeViolation['impact'],
     description: violation.description,
@@ -200,7 +220,7 @@ async function renderAndDetectViolations(
 
   if (browser) {
     const violations = await runAxeInBrowser(adapter, options);
-    return violations.map(toAxeViolation);
+    return violations.map((violation) => toAxeViolation(violation, options.absolutePath));
   }
 
   return withJsdomEnvironment(async () => {
@@ -213,31 +233,39 @@ async function renderAndDetectViolations(
       const results = await axe.run(container, {
         rules: { 'color-contrast': { enabled: false } },
       });
-      return results.violations.map(toAxeViolation);
+      return results.violations.map((violation) => toAxeViolation(violation, options.absolutePath));
     } finally {
       cleanup();
     }
   });
 }
 
-async function detectViolationsInFile(filePath: string, browser: boolean): Promise<AxeViolation[]> {
-  const absolutePath = path.resolve(filePath);
-  return renderAndDetectViolations({ absolutePath }, browser);
-}
-
+/**
+ * Renders every component file at `options.componentPath` (a file, or a
+ * directory — see `resolveComponentFiles`) and runs axe-core against
+ * each. Every violation carries the `filePath` it came from, and `files`
+ * lists each file rendered with the exact text that was checked. Each
+ * file is read once and that same text is rendered, so a violation never
+ * describes text other than `files[i].source`.
+ */
 export async function detectViolations(options: DetectOptions): Promise<DetectResult> {
-  const files = resolveComponentFiles(options.componentPath);
+  const filePaths = resolveComponentFiles(options.componentPath).map((file) => path.resolve(file));
   const browser = Boolean(options.browser);
+  const files: DetectedFile[] = [];
   const violations: AxeViolation[] = [];
 
   const detectAll = async () => {
-    for (const file of files) {
-      violations.push(...(await detectViolationsInFile(file, browser)));
+    for (const filePath of filePaths) {
+      const source = readFileSync(filePath, 'utf8');
+      files.push({ filePath, source });
+      violations.push(
+        ...(await renderAndDetectViolations({ absolutePath: filePath, source }, browser)),
+      );
     }
   };
   await (browser ? withBrowserSession(detectAll) : detectAll());
 
-  return { componentPath: options.componentPath, violations };
+  return { componentPath: options.componentPath, files, violations };
 }
 
 export interface DetectInSourceOptions {
@@ -263,5 +291,9 @@ export async function detectViolationsInSource(
     { absolutePath, source: options.source },
     Boolean(options.browser),
   );
-  return { componentPath: absolutePath, violations };
+  return {
+    componentPath: absolutePath,
+    files: [{ filePath: absolutePath, source: options.source }],
+    violations,
+  };
 }

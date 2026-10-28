@@ -185,7 +185,8 @@ vitest; `generate/` isn't (see below).
       exported so this can list a directory's component files and run the
       per-file pipeline against each one (`detectViolations` itself still
       aggregates a whole directory into one flat, file-unattributed
-      violation list — fine for its own tests, not enough here). Throws
+      violation list — fine for its own tests, not enough here; _update
+      2026-10-28:_ no longer — see "Per-file attribution"). Throws
       only if `targetPath` doesn't exist. Tests: `test/scan.test.ts` mocks
       only `generateFix` (the sole piece needing live Claude credentials)
       and runs the real detect/context/verify pipeline against scratch
@@ -1018,6 +1019,29 @@ node_modules/**`; also added a `packages/*/scripts/**/*.js` block
       `[violation]` line doesn't show a line number, so two duplicates
       print identically until their diffs.
 
+- [x] Per-file attribution in detect results (2026-10-28): every
+      `AxeViolation` now carries `filePath` (absolute; set in
+      `toAxeViolation` for jsdom and browser renders, React and Vue, and
+      by `detectViolationsInSource`). `DetectResult` also gained `files`:
+      every file rendered, clean ones included, with the exact `source`
+      that was checked (each file is read once and that text rendered).
+      `scan()` dropped its per-file workaround — listing files with
+      `resolveComponentFiles` and calling detect once per file — and now
+      makes one `detectViolations` call for the target, then fixes each
+      file's violations by `filePath`, using `files[].source` as the
+      "file changed since scan" baseline. Consequence: every file is
+      rendered before any fix is generated (previously file N+1 was
+      detected after file N's fixes were written). The VS Code extension
+      now places a diagnostic, and looks for a fix, only for violations
+      whose `filePath` is the document, and passes that `filePath` to
+      `gatherContext`. `scan()` results, `--json` output and the
+      corrections log are unchanged apart from `violation.filePath`
+      appearing on each violation. `resolveComponentFiles` stays exported.
+      Tests: `test/detect-attribution.test.ts` (directory fixture
+      `test/fixtures/two-files/`: a React and a Vue file with different
+      violations plus a clean file — jsdom and browser, scan(), CLI
+      output order).
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal
@@ -1054,7 +1078,8 @@ node_modules/**`; also added a `packages/*/scripts/**/*.js` block
   around this by having `cli/` resolve files itself and call
   `detectViolations` once per file instead). Worth revisiting if another
   caller ever needs directory-wide results with per-violation file
-  attribution in one call.
+  attribution in one call. _Update 2026-10-28:_ resolved — see the
+  "Per-file attribution" Done entry.
 
 ## `generate/` prompt-quality review (2026-08-10)
 

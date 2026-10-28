@@ -33,6 +33,7 @@ const CONTRAST_SUMMARY =
   'Fix any of the following:\n  Element has insufficient color contrast of 1.6 (foreground color: #cccccc, background color: #ffffff, font size: 12.0pt (16px), font weight: normal). Expected contrast ratio of 4.5:1';
 
 const contrastViolation: AxeViolation = {
+  filePath: fixture('LowContrastText.tsx'),
   id: 'color-contrast',
   impact: 'serious',
   description:

@@ -5,6 +5,8 @@
  * translates between the core library's types and VS Code's.
  */
 
+import * as path from 'node:path';
+
 import * as vscode from 'vscode';
 import { detectViolations, gatherContext } from 'a11y-autofix';
 import type { AxeViolation, FixContext } from 'a11y-autofix';
@@ -19,6 +21,15 @@ function disabledRuleIds(): Set<string> {
     .getConfiguration('a11yAutofix')
     .get<string[]>('disabledRules', []);
   return new Set(configured);
+}
+
+/**
+ * Whether a violation was found in `componentPath` itself, going by the
+ * file the core library attributed it to rather than assuming every
+ * result belongs to the file that was scanned.
+ */
+export function isViolationInFile(violation: AxeViolation, componentPath: string): boolean {
+  return path.resolve(violation.filePath) === path.resolve(componentPath);
 }
 
 export function isSupportedDocument(document: vscode.TextDocument): boolean {
@@ -90,8 +101,10 @@ export async function scanDocument(document: vscode.TextDocument): Promise<vscod
   const diagnostics: vscode.Diagnostic[] = [];
   for (const violation of violations) {
     if (disabled.has(violation.id)) continue;
+    // A diagnostic is placed in this document, so it must come from it.
+    if (!isViolationInFile(violation, componentPath)) continue;
     try {
-      const context = await gatherContext({ violation, componentPath });
+      const context = await gatherContext({ violation, componentPath: violation.filePath });
       diagnostics.push(toDiagnostic(violation, context));
     } catch {
       // Couldn't locate this one violation's element — skip just this
