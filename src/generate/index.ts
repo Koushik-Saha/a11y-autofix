@@ -91,6 +91,10 @@ Return only a replacement for that one element. It must be a drop-in substitute:
 
 When the fix needs new text — alt text, an aria-label, a form label — write something specific and meaningful based on the surrounding context, not a generic placeholder like "image" or "TODO".
 
+For a link, or a button that is not icon-only, prefer adding real visible text as the element's child content over adding an aria-label. An aria-label-only link or button passes axe-core but shows sighted users nothing. An aria-label (or aria-labelledby) is acceptable for a genuinely icon-only control, such as a button whose only content is an icon.
+
+Some rules flag an element because of how it relates to another element — for example landmark-unique, where two landmarks share the same accessible name. For these relational rules, fixing only the flagged element is sufficient and expected: change it so the conflict is resolved on its own (e.g. give it a name that differs from the sibling's). Do not change the sibling, and do not write a replacement that assumes the sibling will also change.
+
 If you are shown a previous attempt that was rejected, produce a genuinely different fix that addresses why it was rejected — do not repeat it.`;
 
 function buildRetrySection(previousAttempt: PreviousAttempt): string {
