@@ -14,6 +14,8 @@ import { Node, Project, SyntaxKind } from 'ts-morph';
 
 import type { AxeNodeResult } from '../../detect';
 import { parseHtmlAttributes, parseSelector } from './axe-selector';
+import { SourceResolver } from './resolve';
+import type { PropReference, ResolvedSourceContext } from './resolve';
 import type {
   FrameworkAdapter,
   FrameworkElementContext,
@@ -241,6 +243,34 @@ function extractPropTypes(sourceFile: SourceFile): string | null {
   return null;
 }
 
+/** The element's `prop={expression}` attributes (not `key`/`ref`/spreads), handlers marked. */
+function propReferences(element: JsxElementLike): PropReference[] {
+  const opening = Node.isJsxElement(element) ? element.getOpeningElement() : element;
+  return opening.getAttributes().flatMap((attribute) => {
+    if (!Node.isJsxAttribute(attribute)) return [];
+    const prop = attribute.getNameNode().getText();
+    if (prop === 'key' || prop === 'ref') return [];
+    const initializer = attribute.getInitializer();
+    if (!initializer || !Node.isJsxExpression(initializer)) return [];
+    const expression = initializer.getExpression();
+    if (!expression) return [];
+    return [{ prop, expression, isHandler: /^on[A-Z]/.test(prop) }];
+  });
+}
+
+/** Best-effort: any failure means no resolved context, never a failed gatherContext. */
+function resolveElement(
+  element: JsxElementLike,
+  componentPath: string,
+): ResolvedSourceContext | null {
+  try {
+    const resolver = new SourceResolver(element.getProject(), path.dirname(componentPath));
+    return resolver.resolveProps(propReferences(element));
+  } catch {
+    return null;
+  }
+}
+
 function gatherElementContext(options: GatherElementContextOptions): FrameworkElementContext {
   const { componentPath, violationNode } = options;
 
@@ -253,12 +283,15 @@ function gatherElementContext(options: GatherElementContextOptions): FrameworkEl
     ? getElementChildren(parent).filter((sibling) => sibling !== element)
     : [];
 
+  const resolved = resolveElement(element, componentPath);
+
   return {
     sourceCode: source,
     element: toSnapshot(element, componentPath, offsetShift),
     parent: parent ? toSnapshot(parent, componentPath, offsetShift) : null,
     siblings: siblings.map((sibling) => toSnapshot(sibling, componentPath, offsetShift)),
     propTypes: extractPropTypes(sourceFile),
+    ...(resolved ? { resolved } : {}),
   };
 }
 

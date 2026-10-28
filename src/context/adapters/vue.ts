@@ -27,6 +27,8 @@ import { Project, SyntaxKind, Node as TsNode } from 'ts-morph';
 
 import type { AxeNodeResult } from '../../detect';
 import { parseHtmlAttributes, parseSelector } from './axe-selector';
+import { SourceResolver } from './resolve';
+import type { ResolvedSourceContext } from './resolve';
 import type {
   FrameworkAdapter,
   FrameworkElementContext,
@@ -207,6 +209,83 @@ function parseTemplate(componentPath: string, sourceText: string) {
   return { descriptor, root };
 }
 
+/** `:src="expr"` / `@click="expr"` bindings on the element, with a static argument. */
+function templateBindings(
+  element: ElementNode,
+): { prop: string; source: string; isHandler: boolean }[] {
+  return element.props.flatMap((prop) => {
+    if (prop.type !== NodeTypes.DIRECTIVE) return [];
+    if (prop.name !== 'bind' && prop.name !== 'on') return [];
+    const arg = prop.arg;
+    const exp = prop.exp;
+    if (!arg || arg.type !== NodeTypes.SIMPLE_EXPRESSION || !arg.isStatic) return [];
+    if (!exp || exp.type !== NodeTypes.SIMPLE_EXPRESSION || !exp.content.trim()) return [];
+    if (prop.name === 'bind' && (arg.content === 'key' || arg.content === 'ref')) return [];
+    return [
+      {
+        prop: prop.name === 'on' ? `@${arg.content}` : `:${arg.content}`,
+        source: exp.content,
+        isHandler: prop.name === 'on',
+      },
+    ];
+  });
+}
+
+/**
+ * Resolves the element's template bindings against `<script setup>`: the
+ * script is parsed with ts-morph and the template expressions are
+ * appended as one probe statement, so they're looked up in the script's
+ * top-level scope exactly as the template would see them. Parsed only,
+ * never executed. Best-effort: null on any failure.
+ */
+function resolveElement(
+  element: ElementNode,
+  componentPath: string,
+  scriptSetup: { content: string; loc: { start: { line: number } } } | null | undefined,
+): ResolvedSourceContext | null {
+  if (!scriptSetup) return null;
+  const bindings = templateBindings(element);
+  if (bindings.length === 0) return null;
+
+  try {
+    const project = new Project({ useInMemoryFileSystem: true });
+    const scriptPath = path.join(
+      path.dirname(componentPath),
+      `${path.basename(componentPath)}.script-setup.ts`,
+    );
+    const probe = `\n;[${bindings.map((binding) => `(${binding.source})`).join(', ')}];\n`;
+    const sourceFile = project.createSourceFile(scriptPath, scriptSetup.content + probe);
+
+    const last = sourceFile.getStatements().at(-1);
+    const array = TsNode.isExpressionStatement(last) ? last.getExpression() : undefined;
+    if (!array || !TsNode.isArrayLiteralExpression(array)) return null;
+    const expressions = array.getElements();
+    if (expressions.length !== bindings.length) return null;
+
+    const resolver = new SourceResolver(
+      project,
+      path.dirname(componentPath),
+      new Map([
+        [
+          sourceFile.getFilePath(),
+          { name: path.basename(componentPath), lineOffset: scriptSetup.loc.start.line - 1 },
+        ],
+      ]),
+    );
+    return resolver.resolveProps(
+      bindings.map((binding, index) => {
+        const element = expressions[index]!;
+        const expression = TsNode.isParenthesizedExpression(element)
+          ? element.getExpression()
+          : element;
+        return { prop: binding.prop, expression, isHandler: binding.isHandler };
+      }),
+    );
+  } catch {
+    return null;
+  }
+}
+
 function gatherElementContext(options: GatherElementContextOptions): FrameworkElementContext {
   const { componentPath, violationNode } = options;
 
@@ -214,6 +293,7 @@ function gatherElementContext(options: GatherElementContextOptions): FrameworkEl
   const { descriptor, root } = parseTemplate(componentPath, sourceText);
 
   const { node: element, parent } = locateElement(root, violationNode);
+  const resolved = resolveElement(element, componentPath, descriptor.scriptSetup);
   const siblings = elementChildrenOf(parent ?? root).filter((sibling) => sibling !== element);
 
   return {
@@ -222,6 +302,7 @@ function gatherElementContext(options: GatherElementContextOptions): FrameworkEl
     parent: parent ? toSnapshot(parent, componentPath, sourceText) : null,
     siblings: siblings.map((sibling) => toSnapshot(sibling, componentPath, sourceText)),
     propTypes: extractPropTypes(descriptor.scriptSetup?.content),
+    ...(resolved ? { resolved } : {}),
   };
 }
 

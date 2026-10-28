@@ -9,7 +9,7 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
 
 import type { AxeViolation } from '../detect';
-import type { FixContext, SourceRange } from '../context';
+import type { FixContext, ResolvedSourceContext, SourceRange } from '../context';
 
 import {
   buildContrastSection,
@@ -91,11 +91,46 @@ Return only a replacement for that one element. It must be a drop-in substitute:
 
 When the fix needs new text — alt text, an aria-label, a form label — write something specific and meaningful based on the surrounding context, not a generic placeholder like "image" or "TODO".
 
+When values resolved from source or event handler implementations are provided, use them to write specific alt text and labels (what the image shows, what the control does), but do not mention them in the fix itself — no file paths, variable names, or code.
+
 For a link, or a button that is not icon-only, prefer adding real visible text as the element's child content over adding an aria-label. An aria-label-only link or button passes axe-core but shows sighted users nothing. An aria-label (or aria-labelledby) is acceptable for a genuinely icon-only control, such as a button whose only content is an icon.
 
 Some rules flag an element because of how it relates to another element — for example landmark-unique, where two landmarks share the same accessible name. For these relational rules, fixing only the flagged element is sufficient and expected: change it so the conflict is resolved on its own (e.g. give it a name that differs from the sibling's). Do not change the sibling, and do not write a replacement that assumes the sibling will also change.
 
 If you are shown a previous attempt that was rejected, produce a genuinely different fix that addresses why it was rejected — do not repeat it.`;
+
+/**
+ * context/'s statically resolved prop values and handler bodies, labeled
+ * so the model can tell them apart from the element's own code.
+ */
+function buildResolvedSection(resolved: ResolvedSourceContext): string {
+  const lines: string[] = [];
+  if (resolved.values.length > 0) {
+    lines.push(
+      '',
+      'Values resolved from source (static analysis of this file and its local imports; context only, not part of the element):',
+      ...resolved.values.map((value) => {
+        const partly = value.complete ? '' : ' (partly dynamic: ${…} parts are unknown)';
+        return `- ${value.prop}={${value.expression}} resolves to ${JSON.stringify(value.value)}${partly}, from ${value.from.join(' ← ')}`;
+      }),
+    );
+  }
+  if (resolved.handlers.length > 0) {
+    lines.push(
+      '',
+      'Event handler implementations (resolved from source; context only, do not modify):',
+      ...resolved.handlers.map((handler) =>
+        [
+          `${handler.prop}={${handler.expression}} is ${handler.from}${handler.truncated ? ', shown truncated' : ''}:`,
+          '```ts',
+          handler.code,
+          '```',
+        ].join('\n'),
+      ),
+    );
+  }
+  return lines.join('\n');
+}
 
 function buildRetrySection(previousAttempt: PreviousAttempt): string {
   const reasons = [
@@ -170,7 +205,7 @@ function buildUserPrompt(
   previousAttempt: PreviousAttempt | undefined,
   contrastPlan: ContrastPlan | null,
 ): string {
-  const { violation, element, parent, siblings, propTypes } = context;
+  const { violation, element, parent, siblings, propTypes, resolved } = context;
   const violationNode = violation.nodes[0];
 
   const sections = [
@@ -192,6 +227,7 @@ function buildUserPrompt(
           .join('\n')}`
       : null,
     propTypes ? `\nComponent prop types (context only):\n\`\`\`ts\n${propTypes}\n\`\`\`` : null,
+    resolved ? buildResolvedSection(resolved) : null,
     contrastPlan ? buildContrastSection(contrastPlan.measurement, contrastPlan.suggestion) : null,
     previousAttempt ? buildRetrySection(previousAttempt) : null,
   ];

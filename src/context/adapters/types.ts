@@ -9,6 +9,9 @@
  */
 
 import type { AxeNodeResult } from '../../detect';
+import type { ResolvedSourceContext } from './resolve';
+
+export type { ResolvedHandler, ResolvedSourceContext, ResolvedValue } from './resolve';
 
 export interface JsxSourceLocation {
   filePath: string;
@@ -62,6 +65,12 @@ export interface FrameworkElementContext {
   parent: JsxElementSnapshot | null;
   siblings: JsxElementSnapshot[];
   propTypes: string | null;
+  /**
+   * What the element's dynamic props resolve to — constant values and
+   * event handler bodies, read statically from this file and its local
+   * imports (see resolve.ts). Absent when nothing resolved.
+   */
+  resolved?: ResolvedSourceContext;
 }
 
 /**

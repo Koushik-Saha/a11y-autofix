@@ -17,7 +17,7 @@
 import path from 'node:path';
 
 import { reactAdapter } from './adapters/react';
-import type { FrameworkAdapter, JsxElementSnapshot } from './adapters/types';
+import type { FrameworkAdapter, JsxElementSnapshot, ResolvedSourceContext } from './adapters/types';
 import { vueAdapter } from './adapters/vue';
 import type { AxeViolation } from '../detect';
 import type { LocateElementsOptions, SourceRange } from './adapters/types';
@@ -27,6 +27,9 @@ export type {
   JsxSourceLocation,
   FrameworkAdapter,
   LocateElementsOptions,
+  ResolvedHandler,
+  ResolvedSourceContext,
+  ResolvedValue,
   SourceRange,
 } from './adapters/types';
 
@@ -39,6 +42,13 @@ export interface FixContext {
   parent: JsxElementSnapshot | null;
   siblings: JsxElementSnapshot[];
   propTypes: string | null;
+  /**
+   * Best-effort, purely static resolution of the element's dynamic props:
+   * constant values (`src={avatarUrl}` → the string) and event handler
+   * bodies, from this file and its relatively-imported local files.
+   * Absent when nothing could be resolved — never a guess.
+   */
+  resolved?: ResolvedSourceContext;
 }
 
 export interface GatherContextOptions {
