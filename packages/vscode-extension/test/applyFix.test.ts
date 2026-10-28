@@ -19,8 +19,9 @@ import * as vscode from 'vscode';
 import { applyFix } from '../src/applyFix';
 import { resetVscodeMock, window, workspace } from './vscode-mock';
 
-function violation(id = 'image-alt'): Record<string, unknown> {
+function violation(id = 'image-alt', filePath = '/repo/Avatar.tsx'): Record<string, unknown> {
   return {
+    filePath,
     id,
     impact: 'critical',
     description: 'Ensure <img> elements have alternative text',
@@ -95,6 +96,21 @@ describe('applyFix', () => {
 
     expect(resolveFix).toHaveBeenCalledTimes(1);
     expect(resolveFix).toHaveBeenCalledWith(context(8, 5), violation('image-alt'));
+  });
+
+  it("ignores a same-rule violation attributed to another file, even at the diagnostic's position", async () => {
+    detectViolations.mockResolvedValue({
+      violations: [violation('image-alt', '/repo/Other.tsx')],
+    });
+    gatherContext.mockResolvedValue(context(8, 5));
+
+    await applyFix(fakeDocument(), range, 'image-alt');
+
+    expect(gatherContext).not.toHaveBeenCalled();
+    expect(resolveFix).not.toHaveBeenCalled();
+    expect(window.showErrorMessage).toHaveBeenCalledWith(
+      expect.stringContaining("couldn't re-locate"),
+    );
   });
 
   it('applies the patched source via WorkspaceEdit when verification succeeds', async () => {

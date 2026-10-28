@@ -180,7 +180,7 @@ Pass `{ browser: true }` to detect and verify in headless Chromium, which adds `
 
 The CLI's `--interactive` mode is built entirely on two `scan()` options, exported for anyone who wants to build their own review UI instead of the built-in terminal prompt: pass `onVerifiedFix` to be asked for a `VerifiedFixDecision` (`{ action: 'accept' }`, `{ action: 'reject' }`, or `{ action: 'edit', newSnippet }`) for each verified fix — an edit is re-verified the same way every AI-generated fix is, before ever being applied — and `onFixResolved` for a fire-and-forget callback reporting how each one was ultimately resolved. See `src/cli/interactive.ts` for the reference implementation.
 
-The individual pipeline stages (`detectViolations`, `gatherContext`, `generateFix`, `verifyFix`) are also exported, if you want to drive the pipeline yourself instead of using `scan()`.
+The individual pipeline stages (`detectViolations`, `gatherContext`, `generateFix`, `verifyFix`) are also exported, if you want to drive the pipeline yourself instead of using `scan()`. `detectViolations` accepts a file or a directory; every violation it returns carries the `filePath` it was found in, and `result.files` lists each file it rendered (clean ones included).
 
 ## GitHub Action
 

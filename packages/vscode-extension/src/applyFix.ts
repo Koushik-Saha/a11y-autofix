@@ -10,6 +10,8 @@ import * as vscode from 'vscode';
 import { detectViolations, gatherContext, resolveFix, applyPatchToSource } from 'a11y-autofix';
 import type { AxeViolation, FixContext } from 'a11y-autofix';
 
+import { isViolationInFile } from './diagnostics';
+
 /**
  * Diagnostics don't carry a live reference back to the AxeViolation that
  * produced them, so the fix command re-runs detectViolations and matches
@@ -25,10 +27,12 @@ async function findViolation(
   range: vscode.Range,
 ): Promise<{ violation: AxeViolation; context: FixContext } | null> {
   const { violations } = await detectViolations({ componentPath });
-  const candidates = violations.filter((violation) => violation.id === ruleId);
+  const candidates = violations.filter(
+    (violation) => violation.id === ruleId && isViolationInFile(violation, componentPath),
+  );
 
   for (const violation of candidates) {
-    const context = await gatherContext({ violation, componentPath });
+    const context = await gatherContext({ violation, componentPath: violation.filePath });
     const { startLine, startColumn } = context.element.location;
     if (startLine - 1 === range.start.line && startColumn - 1 === range.start.character) {
       return { violation, context };

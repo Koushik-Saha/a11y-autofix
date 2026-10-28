@@ -18,6 +18,7 @@ function fakeDocument(fsPath: string): vscode.TextDocument {
 
 function violation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    filePath: '/repo/Avatar.tsx',
     id: 'image-alt',
     impact: 'critical',
     description: 'Ensure <img> elements have alternative text',
@@ -93,6 +94,26 @@ describe('scanDocument', () => {
     const diagnostics = await scanDocument(fakeDocument('/repo/Avatar.tsx'));
 
     expect(diagnostics).toEqual([]);
+  });
+
+  it("places only the document's own violations, located via each violation's filePath", async () => {
+    detectViolations.mockResolvedValue({
+      violations: [
+        violation({ id: 'image-alt' }),
+        violation({ id: 'label', filePath: '/repo/Other.tsx' }),
+      ],
+    });
+    gatherContext.mockResolvedValue(context());
+
+    const diagnostics = await scanDocument(fakeDocument('/repo/Avatar.tsx'));
+
+    expect(diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+      expect.objectContaining({ value: 'image-alt' }),
+    ]);
+    expect(gatherContext).toHaveBeenCalledTimes(1);
+    expect(gatherContext).toHaveBeenCalledWith(
+      expect.objectContaining({ componentPath: '/repo/Avatar.tsx' }),
+    );
   });
 
   it('skips a violation whose element cannot be located, keeping the rest', async () => {
