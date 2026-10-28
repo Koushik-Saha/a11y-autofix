@@ -6,6 +6,7 @@
  * tie-breaker — never by string-matching source text.
  */
 
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import type { JsxElement, JsxSelfClosingElement, SourceFile } from 'ts-morph';
@@ -18,6 +19,8 @@ import type {
   FrameworkElementContext,
   GatherElementContextOptions,
   JsxElementSnapshot,
+  LocateElementsOptions,
+  SourceRange,
 } from './types';
 
 type JsxElementLike = JsxElement | JsxSelfClosingElement;
@@ -120,7 +123,12 @@ function locateJsxElement(sourceFile: SourceFile, node: AxeNodeResult): JsxEleme
   if (parentSegment?.tagName) {
     candidates = candidates.filter((el) => {
       const parent = getJsxParentElement(el);
-      return parent ? getTagName(parent).toLowerCase() === parentSegment.tagName : false;
+      if (!parent || getTagName(parent).toLowerCase() !== parentSegment.tagName) return false;
+      // e.g. "section:nth-child(2) > img": two identical <img>s in two
+      // identical <section>s differ only by their parent's position.
+      return (
+        parentSegment.nthChild === null || getElementSiblingIndex(parent) === parentSegment.nthChild
+      );
     });
   }
 
@@ -154,10 +162,38 @@ function locateJsxElement(sourceFile: SourceFile, node: AxeNodeResult): JsxEleme
   return best.el;
 }
 
-function toSnapshot(node: JsxElementLike, filePath: string): JsxElementSnapshot {
+interface ParsedSource {
+  sourceFile: SourceFile;
+  /**
+   * TypeScript drops a leading BOM from the text it parses, so its
+   * positions are one short of offsets into the raw file text that
+   * verify/ patches. Added to every offset this adapter reports.
+   */
+  offsetShift: number;
+}
+
+function parseSource(componentPath: string, source: string): ParsedSource {
+  // In memory: only the given text is parsed, nothing else is read from disk.
+  const project = new Project({ useInMemoryFileSystem: true });
+  const sourceFile = project.createSourceFile(componentPath, source);
+  const bomDropped =
+    source.charCodeAt(0) === 0xfeff && sourceFile.getFullText().charCodeAt(0) !== 0xfeff;
+  return { sourceFile, offsetShift: bomDropped ? 1 : 0 };
+}
+
+function toRange(node: JsxElementLike, offsetShift: number): SourceRange {
+  return { start: node.getStart() + offsetShift, end: node.getEnd() + offsetShift };
+}
+
+function toSnapshot(
+  node: JsxElementLike,
+  filePath: string,
+  offsetShift: number,
+): JsxElementSnapshot {
   const sourceFile = node.getSourceFile();
   const start = sourceFile.getLineAndColumnAtPos(node.getStart());
   const end = sourceFile.getLineAndColumnAtPos(node.getEnd());
+  const range = toRange(node, offsetShift);
   return {
     tagName: getTagName(node),
     code: node.getText(),
@@ -167,6 +203,8 @@ function toSnapshot(node: JsxElementLike, filePath: string): JsxElementSnapshot 
       startColumn: start.column,
       endLine: end.line,
       endColumn: end.column,
+      startOffset: range.start,
+      endOffset: range.end,
     },
   };
 }
@@ -206,8 +244,8 @@ function extractPropTypes(sourceFile: SourceFile): string | null {
 function gatherElementContext(options: GatherElementContextOptions): FrameworkElementContext {
   const { componentPath, violationNode } = options;
 
-  const project = new Project();
-  const sourceFile = project.addSourceFileAtPath(componentPath);
+  const source = readFileSync(componentPath, 'utf8');
+  const { sourceFile, offsetShift } = parseSource(componentPath, source);
 
   const element = locateJsxElement(sourceFile, violationNode);
   const parent = getJsxParentElement(element);
@@ -216,12 +254,23 @@ function gatherElementContext(options: GatherElementContextOptions): FrameworkEl
     : [];
 
   return {
-    sourceCode: sourceFile.getFullText(),
-    element: toSnapshot(element, componentPath),
-    parent: parent ? toSnapshot(parent, componentPath) : null,
-    siblings: siblings.map((sibling) => toSnapshot(sibling, componentPath)),
+    sourceCode: source,
+    element: toSnapshot(element, componentPath, offsetShift),
+    parent: parent ? toSnapshot(parent, componentPath, offsetShift) : null,
+    siblings: siblings.map((sibling) => toSnapshot(sibling, componentPath, offsetShift)),
     propTypes: extractPropTypes(sourceFile),
   };
+}
+
+function locateElements(options: LocateElementsOptions): (SourceRange | null)[] {
+  const { sourceFile, offsetShift } = parseSource(options.componentPath, options.source);
+  return options.nodes.map((node) => {
+    try {
+      return toRange(locateJsxElement(sourceFile, node), offsetShift);
+    } catch {
+      return null;
+    }
+  });
 }
 
 export const reactAdapter: FrameworkAdapter = {
@@ -230,4 +279,5 @@ export const reactAdapter: FrameworkAdapter = {
     return REACT_EXTENSIONS.has(path.extname(componentPath));
   },
   gatherElementContext,
+  locateElements,
 };

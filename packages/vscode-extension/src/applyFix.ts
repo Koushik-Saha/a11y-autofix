@@ -81,7 +81,15 @@ export async function applyFix(
       }
 
       const currentSource = document.getText();
-      const patchedSource = applyPatchToSource(currentSource, resolved.patch);
+      let patchedSource: string;
+      try {
+        // Throws (rather than patching the wrong element) if the file was
+        // edited while the fix was being generated.
+        patchedSource = applyPatchToSource(currentSource, resolved.patch);
+      } catch (error) {
+        void vscode.window.showErrorMessage(`a11y-autofix: ${(error as Error).message}`);
+        return;
+      }
       const fullRange = new vscode.Range(
         document.positionAt(0),
         document.positionAt(currentSource.length),

@@ -20,8 +20,15 @@ import { reactAdapter } from './adapters/react';
 import type { FrameworkAdapter, JsxElementSnapshot } from './adapters/types';
 import { vueAdapter } from './adapters/vue';
 import type { AxeViolation } from '../detect';
+import type { LocateElementsOptions, SourceRange } from './adapters/types';
 
-export type { JsxElementSnapshot, JsxSourceLocation, FrameworkAdapter } from './adapters/types';
+export type {
+  JsxElementSnapshot,
+  JsxSourceLocation,
+  FrameworkAdapter,
+  LocateElementsOptions,
+  SourceRange,
+} from './adapters/types';
 
 export interface FixContext {
   violation: AxeViolation;
@@ -73,4 +80,18 @@ export async function gatherContext(options: GatherContextOptions): Promise<FixC
     relatedFiles: [],
     ...elementContext,
   };
+}
+
+/**
+ * Where each axe-core node's element sits in `source`, located the same
+ * structural way `gatherContext` locates one; null for a node that can't
+ * be located unambiguously. verify/ uses this to tell which violations a
+ * patch is responsible for.
+ */
+export function locateElements(options: LocateElementsOptions): (SourceRange | null)[] {
+  const absoluteComponentPath = path.resolve(options.componentPath);
+  return findAdapter(absoluteComponentPath).locateElements({
+    ...options,
+    componentPath: absoluteComponentPath,
+  });
 }

@@ -164,7 +164,7 @@ for (const entry of result.violations) {
 }
 ```
 
-`result.violations` is a discriminated union on `status`:
+`result.violations` has one entry per offending source element — two `<img>`s missing `alt` are two entries, each with its own `patch` — as a discriminated union on `status`:
 
 | `status`       | Fields available                                               | Meaning                                                                                                                                                                                                                                  |
 | -------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -253,6 +253,8 @@ detect/  --violations-->  context/  --FixContext-->  generate/  --Patch-->  veri
 4. **verify** is the trust boundary. It applies the proposed patch to the component's source **in memory only** — the file on disk is never modified at this stage — re-renders the patched component, and re-runs axe-core against it. Two things have to be true for a fix to pass:
    - the original violation is actually gone, and
    - no new violation was introduced by the fix.
+
+   The patch is applied at the exact position context/ found the element, so in a file with two identical offending elements each one gets, and is verified on, its own fix. If the file was edited after the scan, applying a fix fails with "file changed since scan — re-run scan" rather than patching whatever is at that position now.
 
    Only a fix that clears both checks is marked `verified`. Everything else — a fix that didn't fully resolve the issue, or fixed one thing while breaking another — comes back `unverified`, carrying the exact violations that prove it. It is never discarded, and it is never written to your files, `--write` or not.
 

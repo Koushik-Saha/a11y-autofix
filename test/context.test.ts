@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { gatherContext } from '../src/context';
 import { detectViolations } from '../src/detect';
@@ -118,5 +118,37 @@ describe('gatherContext', () => {
 
     expect(result.propTypes).toContain('imageUrl: string');
     expect(result.propTypes).toContain('caption: string');
+  });
+});
+
+describe('element offsets', () => {
+  let tempDir: string;
+  beforeEach(() => {
+    tempDir = mkdtempSync(path.join(__dirname, 'tmp-offsets-'));
+  });
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  // startOffset/endOffset are what a Patch records as its position, so
+  // they must slice the element's exact code out of the raw file text —
+  // including when TypeScript has silently dropped a leading BOM.
+  it.each([
+    { name: 'MissingAlt.tsx', bom: false },
+    { name: 'VueMissingAlt.vue', bom: false },
+    { name: 'MissingAlt.tsx', bom: true },
+    { name: 'VueMissingAlt.vue', bom: true },
+  ])('slice the element out of the raw text ($name, BOM: $bom)', async ({ name, bom }) => {
+    const componentPath = path.join(tempDir, name);
+    writeFileSync(componentPath, (bom ? '﻿' : '') + readFileSync(fixture(name), 'utf8'));
+    const { violations } = await detectViolations({ componentPath });
+    const violation = violations.find((v) => v.id === 'image-alt');
+    if (!violation) throw new Error('expected an image-alt violation');
+
+    const { element } = await gatherContext({ violation, componentPath });
+    const raw = readFileSync(componentPath, 'utf8');
+
+    expect(raw.slice(element.location.startOffset, element.location.endOffset)).toBe(element.code);
+    expect(element.code.startsWith('<img')).toBe(true);
   });
 });

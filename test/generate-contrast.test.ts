@@ -144,6 +144,10 @@ describe('generateFix for color-contrast', () => {
     );
     expect(patch.newSnippet).toContain('#767676');
     expect(patch.oldSnippet).toBe(context.element.code);
+    expect(patch.position).toEqual({
+      start: context.element.location.startOffset,
+      end: context.element.location.endOffset,
+    });
   });
 
   it("passes axe-core's measurement of a rejected color back on retry", async () => {

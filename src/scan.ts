@@ -10,14 +10,14 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { detectViolations, resolveComponentFiles } from './detect';
-import type { AxeViolation } from './detect';
+import { detectViolationsInSource, resolveComponentFiles } from './detect';
+import type { AxeNodeResult, AxeViolation } from './detect';
 import { withBrowserSession } from './detect/browser';
-import { gatherContext } from './context';
+import { gatherContext, locateElements } from './context';
 import type { FixContext } from './context';
 import { generateFix } from './generate';
 import type { Patch, PreviousAttempt } from './generate';
-import { applyPatchToSource, verifyFix } from './verify';
+import { StalePatchError, applyPatchToSource, verifyFix } from './verify';
 import type { VerificationResult } from './verify';
 
 export interface ScanOptions {
@@ -90,6 +90,11 @@ export interface ScoredPatch extends Patch {
 
 interface ScanViolationOutcomeBase {
   filePath: string;
+  /**
+   * The violation for this one source element: axe-core's result for the
+   * rule, narrowed to the node(s) that element rendered. A file with two
+   * offending elements for the same rule yields two entries.
+   */
   violation: AxeViolation;
 }
 
@@ -188,6 +193,42 @@ export async function resolveFix(
   });
   const confidence: PatchConfidence = retry.verification.status === 'verified' ? 'medium' : 'low';
   return { patch: { ...retry.patch, confidence }, verification: retry.verification };
+}
+
+/**
+ * axe-core reports one violation per rule with a node per failing DOM
+ * element. This splits it into one violation per *source* element, so
+ * each gets its own context, patch and verification: two identical
+ * `<img>`s are two fixes, while the nodes one JSX element renders several
+ * times (e.g. inside `.map()`) stay together as a single fix. `source` is
+ * the file as this scan last saw it, i.e. including fixes it already
+ * wrote. A node that can't be located becomes its own entry, so
+ * gatherContext reports why.
+ */
+function splitByElement(file: string, source: string, violation: AxeViolation): AxeViolation[] {
+  if (violation.nodes.length <= 1) return [violation];
+
+  let ranges: ReturnType<typeof locateElements>;
+  try {
+    ranges = locateElements({ componentPath: file, source, nodes: violation.nodes });
+  } catch {
+    ranges = violation.nodes.map(() => null);
+  }
+
+  const groups: AxeNodeResult[][] = [];
+  const groupByStart = new Map<number, AxeNodeResult[]>();
+  violation.nodes.forEach((node, index) => {
+    const range = ranges[index];
+    const existing = range ? groupByStart.get(range.start) : undefined;
+    if (existing) {
+      existing.push(node);
+      return;
+    }
+    const group = [node];
+    groups.push(group);
+    if (range) groupByStart.set(range.start, group);
+  });
+  return groups.map((nodes) => ({ ...violation, nodes }));
 }
 
 function applyToDisk(patch: Patch): void {
@@ -291,60 +332,84 @@ async function runInteractiveDecision(
   }
 }
 
+/**
+ * Each violation is located by axe-core's selectors from the render of
+ * `expectedSource`. If something else edited the file since, those
+ * selectors may now point at a different element, so stop rather than
+ * fix the wrong one.
+ */
+function assertUnchangedSinceScan(file: string, ruleId: string, expectedSource: string): void {
+  if (readFileSync(file, 'utf8') !== expectedSource) {
+    throw new StalePatchError(
+      `Cannot fix "${ruleId}" in ${file}: file changed since scan (edited by something other than this scan). Re-run scan to get a fresh fix.`,
+    );
+  }
+}
+
 async function scanFile(file: string, options: ScanOptions): Promise<ScanViolationResult[]> {
-  const { violations } = await detectViolations({
-    componentPath: file,
+  // Detect against exactly this text, so each later step can tell whether
+  // the file is still what was scanned (plus this scan's own writes).
+  let expectedSource = readFileSync(file, 'utf8');
+  const { violations } = await detectViolationsInSource({
+    source: expectedSource,
+    filePath: file,
     browser: Boolean(options.browser),
   });
   const results: ScanViolationResult[] = [];
 
-  for (const violation of violations) {
-    try {
-      const context = await gatherContext({ violation, componentPath: file });
-      const resolved = await resolveFix(context, violation, options);
+  for (const ruleViolation of violations) {
+    // Split per rule, not all up front: with `write`, fixes already
+    // written for earlier rules may have moved this rule's elements.
+    for (const violation of splitByElement(file, expectedSource, ruleViolation)) {
+      try {
+        assertUnchangedSinceScan(file, violation.id, expectedSource);
+        const context = await gatherContext({ violation, componentPath: file });
+        const resolved = await resolveFix(context, violation, options);
 
-      let patch = resolved.patch;
-      let verification = resolved.verification;
-      let applied = false;
+        let patch = resolved.patch;
+        let verification = resolved.verification;
+        let applied = false;
 
-      if (verification.status === 'verified' && options.onVerifiedFix) {
-        const decided = await runInteractiveDecision(
-          file,
-          context.element.location.startLine,
+        if (verification.status === 'verified' && options.onVerifiedFix) {
+          const decided = await runInteractiveDecision(
+            file,
+            context.element.location.startLine,
+            violation,
+            patch,
+            verification,
+            options,
+          );
+          patch = decided.patch;
+          verification = decided.verification;
+          applied = decided.applied;
+        } else if (verification.status === 'verified' && options.write) {
+          applyToDisk(patch);
+          applied = true;
+        }
+        if (applied) expectedSource = readFileSync(file, 'utf8');
+
+        results.push({
+          status: verification.status,
+          filePath: file,
           violation,
+          context,
           patch,
           verification,
-          options,
-        );
-        patch = decided.patch;
-        verification = decided.verification;
-        applied = decided.applied;
-      } else if (verification.status === 'verified' && options.write) {
-        applyToDisk(patch);
-        applied = true;
+          applied,
+        });
+      } catch (error) {
+        results.push({
+          status: 'errored',
+          filePath: file,
+          violation,
+          error: (error as Error).message,
+          // By name rather than instanceof generate/'s NotAutoFixableError, so
+          // it holds even when generate/ is loaded twice or mocked.
+          ...((error as Error)?.name === 'NotAutoFixableError'
+            ? { reason: 'not-auto-fixable' as const }
+            : {}),
+        });
       }
-
-      results.push({
-        status: verification.status,
-        filePath: file,
-        violation,
-        context,
-        patch,
-        verification,
-        applied,
-      });
-    } catch (error) {
-      results.push({
-        status: 'errored',
-        filePath: file,
-        violation,
-        error: (error as Error).message,
-        // By name rather than instanceof generate/'s NotAutoFixableError, so
-        // it holds even when generate/ is loaded twice or mocked.
-        ...((error as Error)?.name === 'NotAutoFixableError'
-          ? { reason: 'not-auto-fixable' as const }
-          : {}),
-      });
     }
   }
 
