@@ -65,7 +65,9 @@ runs:
       continue-on-error: true
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
-      run: npx a11y-autofix scan "${{ inputs.path }}" --json > "${{ runner.temp }}/a11y-autofix-result.json"
+      # --api-key-env pins the key to this Action's own input, even if the
+      # project's a11y-autofix config names a different variable.
+      run: npx a11y-autofix scan "${{ inputs.path }}" --json --api-key-env ANTHROPIC_API_KEY > "${{ runner.temp }}/a11y-autofix-result.json"
 
     - name: Post results to the pull request
       if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'

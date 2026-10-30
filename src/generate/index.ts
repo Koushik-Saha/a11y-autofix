@@ -66,6 +66,12 @@ export interface GenerateFixOptions {
   context: FixContext;
   /** When set, this call is a retry of a previously-rejected attempt. */
   previousAttempt?: PreviousAttempt;
+  /**
+   * Read the API key from this environment variable instead of the SDK's
+   * default `ANTHROPIC_API_KEY`. If it isn't set, this throws rather than
+   * falling back to `ANTHROPIC_API_KEY`.
+   */
+  apiKeyEnv?: string;
 }
 
 /**
@@ -236,13 +242,24 @@ function buildUserPrompt(
 }
 
 export async function generateFix(options: GenerateFixOptions): Promise<Patch> {
-  const { context, previousAttempt } = options;
+  const { context, previousAttempt, apiKeyEnv } = options;
 
   // Before creating the client: a not-auto-fixable violation never costs
   // a model call.
   const contrastPlan = planContrastFix(context);
 
-  const client = new Anthropic();
+  let client: Anthropic;
+  if (apiKeyEnv) {
+    const apiKey = process.env[apiKeyEnv];
+    if (!apiKey) {
+      throw new Error(
+        `No Anthropic API key: the environment variable ${apiKeyEnv} (set by apiKeyEnv) is not set.`,
+      );
+    }
+    client = new Anthropic({ apiKey });
+  } else {
+    client = new Anthropic();
+  }
   const response = await client.messages.parse({
     model: 'claude-opus-5',
     max_tokens: 8000,

@@ -10,7 +10,9 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { detectViolations } from './detect';
+import { createIgnoreMatcher, suppressionReason } from './config';
+import type { Severity, SuppressionReason } from './config';
+import { detectViolations, resolveComponentFiles } from './detect';
 import type { AxeNodeResult, AxeViolation, DetectedFile } from './detect';
 import { withBrowserSession } from './detect/browser';
 import { gatherContext, locateElements } from './context';
@@ -46,6 +48,31 @@ export interface ScanOptions {
    * `scan()`'s behavior.
    */
   onFixResolved?: (info: ResolvedFixInfo) => void | Promise<void>;
+  /**
+   * Glob patterns for component files to skip entirely, matched against
+   * each file's path relative to `root` (see config/'s
+   * `createIgnoreMatcher`). Skipped files are never rendered; they are
+   * listed in `ScanResult.ignoredFiles`.
+   */
+  ignore?: string[];
+  /** The directory `ignore` patterns are relative to. Defaults to `process.cwd()`. */
+  root?: string;
+  /**
+   * axe-core rule ids never to report. Their violations are still
+   * detected but never fixed; they go to `ScanResult.suppressed`.
+   */
+  disableRules?: string[];
+  /**
+   * Minimum impact to report. Violations below it go to
+   * `ScanResult.suppressed` instead of being fixed. A violation with no
+   * impact is always reported.
+   */
+  severity?: Severity;
+  /**
+   * Name of the environment variable holding the Anthropic API key. When
+   * unset, the SDK's own default (`ANTHROPIC_API_KEY`) applies.
+   */
+  apiKeyEnv?: string;
 }
 
 export interface VerifiedFixPromptContext {
@@ -121,10 +148,26 @@ export interface ScanViolationErrored extends ScanViolationOutcomeBase {
 
 export type ScanViolationResult = ScanViolationFixed | ScanViolationErrored;
 
+/**
+ * A violation that was detected but, per `disableRules` or `severity`, not
+ * reported or fixed. Kept (not dropped) so output can say how many were
+ * hidden and why, rather than hiding them silently.
+ */
+export interface SuppressedViolation {
+  filePath: string;
+  /** Narrowed to one source element, like `ScanViolationResult.violation`. */
+  violation: AxeViolation;
+  reason: SuppressionReason;
+}
+
 export interface ScanResult {
   targetPath: string;
   filesScanned: number;
   violations: ScanViolationResult[];
+  /** Violations hidden by `disableRules`/`severity` — never fixed, counted separately from `violations`. */
+  suppressed: SuppressedViolation[];
+  /** Component files under the target skipped by `ignore` (absolute paths, never rendered). */
+  ignoredFiles: string[];
 }
 
 interface Attempt {
@@ -132,10 +175,12 @@ interface Attempt {
   verification: VerificationResult;
 }
 
-/** Options `resolveFix` honours — the subset of `ScanOptions` that affects how a fix is checked. */
+/** Options `resolveFix` honours — the subset of `ScanOptions` that affects how a fix is generated and checked. */
 export interface ResolveFixOptions {
   /** Verify in headless Chromium instead of jsdom. See `ScanOptions.browser`. */
   browser?: boolean;
+  /** See `ScanOptions.apiKeyEnv`. */
+  apiKeyEnv?: string;
 }
 
 async function attemptFix(
@@ -144,7 +189,11 @@ async function attemptFix(
   options: ResolveFixOptions,
   previousAttempt?: PreviousAttempt,
 ): Promise<Attempt> {
-  const patch = await generateFix({ context, ...(previousAttempt ? { previousAttempt } : {}) });
+  const patch = await generateFix({
+    context,
+    ...(previousAttempt ? { previousAttempt } : {}),
+    ...(options.apiKeyEnv ? { apiKeyEnv: options.apiKeyEnv } : {}),
+  });
   const verification = await verifyFix({
     patch,
     originalViolation: violation,
@@ -428,6 +477,10 @@ async function fixFile(
  * node, a Claude API error, a bad patch) are captured as
  * `status: 'errored'` entries rather than aborting the whole scan.
  *
+ * Files matching `options.ignore` are never rendered (`ignoredFiles`).
+ * Violations hidden by `options.disableRules` / `options.severity` are
+ * detected but never fixed; they go to `suppressed`, not `violations`.
+ *
  * With `options.browser`, one headless Chromium is launched up front and
  * shared by every detect/verify render in the scan; if it can't be
  * launched, this rejects with `BrowserUnavailableError` before scanning
@@ -435,8 +488,13 @@ async function fixFile(
  */
 export async function scan(targetPath: string, options: ScanOptions = {}): Promise<ScanResult> {
   const absoluteTarget = path.resolve(targetPath);
+  const isIgnored = createIgnoreMatcher(options.ignore ?? [], options.root ?? process.cwd());
+  const ignoredFiles = resolveComponentFiles(absoluteTarget)
+    .map((file) => path.resolve(file))
+    .filter(isIgnored);
 
   const violations: ScanViolationResult[] = [];
+  const suppressed: SuppressedViolation[] = [];
   let filesScanned = 0;
   const scanAll = async () => {
     // One detect pass over the whole target (every file is rendered before
@@ -445,16 +503,27 @@ export async function scan(targetPath: string, options: ScanOptions = {}): Promi
     const detected = await detectViolations({
       componentPath: absoluteTarget,
       browser: Boolean(options.browser),
+      exclude: isIgnored,
     });
     filesScanned = detected.files.length;
     for (const file of detected.files) {
-      const fileViolations = detected.violations.filter(
-        (violation) => violation.filePath === file.filePath,
-      );
-      violations.push(...(await fixFile(file, fileViolations, options)));
+      const toFix: AxeViolation[] = [];
+      for (const violation of detected.violations) {
+        if (violation.filePath !== file.filePath) continue;
+        const reason = suppressionReason(violation, options);
+        if (!reason) {
+          toFix.push(violation);
+          continue;
+        }
+        // Counted per source element, the same unit as `violations`.
+        for (const element of splitByElement(file.filePath, file.source, violation)) {
+          suppressed.push({ filePath: file.filePath, violation: element, reason });
+        }
+      }
+      violations.push(...(await fixFile(file, toFix, options)));
     }
   };
   await (options.browser ? withBrowserSession(scanAll) : scanAll());
 
-  return { targetPath: absoluteTarget, filesScanned, violations };
+  return { targetPath: absoluteTarget, filesScanned, violations, suppressed, ignoredFiles };
 }

@@ -77,16 +77,37 @@ function summaryDetailFor(entry) {
 }
 
 /**
+ * "3 suppressed by project config (region ×2, heading-order ×1)", or null
+ * when config hid nothing. `suppressed` is the scan result's list of
+ * violations hidden by `disableRules`/`severity`; counting them keeps a
+ * config from making the PR comment claim an all-clear it didn't earn.
+ */
+function describeSuppressed(suppressed) {
+  if (!suppressed || suppressed.length === 0) return null;
+  const byRule = new Map();
+  for (const entry of suppressed) {
+    byRule.set(entry.violation.id, (byRule.get(entry.violation.id) || 0) + 1);
+  }
+  const rules = [...byRule].map(([id, count]) => `${id} ×${count}`).join(', ');
+  return `${suppressed.length} suppressed by project config (${rules})`;
+}
+
+/**
  * The single sticky PR comment: an overview line, then a table of
  * everything that did NOT become an inline suggestion (with why), plus
- * expandable per-item detail. Returns null when there's nothing to say
- * (no violations at all) other than the all-clear message.
+ * expandable per-item detail, plus a count of anything the project config
+ * suppressed.
  */
-function renderSummaryCommentBody(inline, summary) {
+function renderSummaryCommentBody(inline, summary, suppressed = []) {
   const parts = [SUMMARY_MARKER, '## a11y-autofix results', ''];
+  const suppressedNote = describeSuppressed(suppressed);
 
   if (inline.length === 0 && summary.length === 0) {
-    parts.push('✅ No accessibility violations found.');
+    parts.push(
+      suppressedNote
+        ? `✅ No accessibility violations to fix. ℹ️ ${suppressedNote} — not fixed or reported individually.`
+        : '✅ No accessibility violations found.',
+    );
     return parts.join('\n');
   }
 
@@ -111,6 +132,10 @@ function renderSummaryCommentBody(inline, summary) {
       '',
       '</details>',
     );
+  }
+
+  if (suppressedNote) {
+    parts.push('', `ℹ️ ${suppressedNote} — not fixed or reported individually.`);
   }
 
   return parts.join('\n');
