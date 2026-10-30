@@ -56,6 +56,39 @@ Pass `--json` to get the full scan result as machine-readable JSON on stdout ins
 npx a11y-autofix scan src/components --json > result.json
 ```
 
+### Whole-page scanning (`scan-url`)
+
+```sh
+npx a11y-autofix scan-url https://example.com/pricing
+npx a11y-autofix scan-url https://example.com/ --scroll --json > page.json
+npx a11y-autofix scan-url http://localhost:3000/ --allow-host localhost:3000   # your dev server
+```
+
+`scan-url` loads a page in headless Chromium, waits for the network to go idle plus a settle delay (`--settle`, default 1000 ms), and runs axe-core's WCAG 2.0, 2.1 and 2.2 A/AA rules plus its best practices over the whole document. That includes the document-level rules component scanning can't check: `html-has-lang`, `document-title`, `bypass`, `page-has-heading-one` and the landmark rules. Results are grouped by rule: low contrast on 40 elements is one finding with 40 elements, each with its selector and HTML. `scanUrl(url, options)` is the library version.
+
+**Page mode reports; it doesn't fix.** A live page has no component source to patch, so no fixes are generated, and the output says so. To fix what it finds, scan the components that render the page with `scan`. The exit code is non-zero when the page has violations.
+
+**Safety:**
+
+- Only `http` and `https` URLs are accepted.
+- Every request the page makes goes through a local filtering proxy: the page itself, each redirect, subresources, `fetch`, and HTTPS tunnels. The proxy refuses private, loopback, link-local and reserved addresses, whether they're written as IPs or are what a hostname resolves to. It connects only to the address it checked, so a hostname can't re-resolve somewhere private in between.
+- A page that redirects to a private address is refused. A blocked subresource is listed in `blockedRequests`.
+- To scan a local server, allow that one host with `--allow-host host[:port]` (repeatable). Nothing else private is allowed.
+- The time limit is `--timeout` (default 30000 ms).
+- There's no clicking or typing. The only interaction is the optional `--scroll`, which scrolls the page to trigger lazy-loaded content.
+
+| Check                                                                     | `scan`                                         | `scan --browser`     | `scan-url`         |
+| ------------------------------------------------------------------------- | ---------------------------------------------- | -------------------- | ------------------ |
+| Element rules (`image-alt`, `label`, `button-name`, `link-name`, ARIA, …) | Yes                                            | Yes                  | Yes                |
+| `color-contrast`                                                          | No (jsdom can't measure it)                    | Yes                  | Yes                |
+| `heading-order`                                                           | Within one component                           | Within one component | Whole page         |
+| `html-has-lang`, `document-title`                                         | No                                             | No                   | Yes                |
+| `bypass`, `page-has-heading-one`, `landmark-one-main`, `region`           | No                                             | No                   | Yes                |
+| What is checked                                                           | Component source files, rendered one at a time | Same, in Chromium    | One rendered URL   |
+| Fixes                                                                     | Verified fixes                                 | Verified fixes       | None (report only) |
+
+Not checked in page mode: content inside iframes, and anything behind interaction (menus, dialogs, form states).
+
 ### Reports: SARIF and HTML
 
 ```sh

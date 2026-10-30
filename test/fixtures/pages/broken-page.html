@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  A whole page with the four document-level problems scan-url must report
+  (test/scan-url.test.ts): no lang on <html>, no <title>, a skipped heading
+  level (h1 then h3), and low-contrast text — three paragraphs, so the one
+  color-contrast finding groups three elements. The stylesheet points at a
+  second local server the SSRF guard must never let the page reach; the
+  test fills in that server's origin.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="{{SECRET_ORIGIN}}/internal.css" />
+    <style>
+      .muted {
+        color: #cccccc;
+        background: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Garden store</h1>
+      <h3>This week</h3>
+      <p class="muted">Free shipping on orders over $50.</p>
+      <p class="muted">Returns are accepted within 30 days.</p>
+      <p class="muted">The spring sale ends on Sunday.</p>
+    </main>
+  </body>
+</html>

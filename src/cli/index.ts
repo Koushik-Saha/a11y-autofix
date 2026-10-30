@@ -19,6 +19,8 @@ import { Command } from 'commander';
 
 import { ConfigError, loadProjectConfig, parseProjectConfig, resolveSettings } from '../config';
 import type { LoadedConfig, ProjectConfig, ResolvedSettings } from '../config';
+import { PageScanTimeoutError, UrlNotAllowedError, scanUrl } from '../page';
+import type { PageScanResult, ScanUrlOptions } from '../page';
 import { toHtmlReport, toSarif } from '../report';
 import { appendCorrection } from './corrections-log';
 import { createInteractiveHandler } from './interactive';
@@ -461,6 +463,87 @@ export function runReport(resultPath: string, options: ReportCommandOptions = {}
   return 0;
 }
 
+export interface CliScanUrlOptions extends ScanUrlOptions {
+  /** Print the full result as JSON. */
+  json?: boolean;
+}
+
+/** How many elements to print per rule before "and N more". */
+const ELEMENTS_SHOWN = 5;
+
+function printPageScan(result: PageScanResult): void {
+  const redirected = result.finalUrl !== result.url ? ` (redirected to ${result.finalUrl})` : '';
+  console.log(`Scanned ${result.url}${redirected}${result.title ? `: "${result.title}"` : ''}`);
+  console.log(result.note);
+  if (!result.networkIdle) {
+    console.log('Note: the network never went idle; content loaded later may be missing.');
+  }
+
+  for (const violation of result.violations) {
+    const wcag = [...violation.wcag.criteria.map((c) => `WCAG ${c}`), ...violation.wcag.levels];
+    const tags = wcag.length > 0 ? wcag.join(', ') : violation.bestPractice ? 'best practice' : '';
+    console.log(
+      `\n[${violation.impact ?? 'unknown'}] ${violation.ruleId}: ${violation.help}${tags ? ` (${tags})` : ''} — ${violation.elementCount} element${violation.elementCount === 1 ? '' : 's'}`,
+    );
+    for (const element of violation.elements.slice(0, ELEMENTS_SHOWN)) {
+      const html = element.html.length > 100 ? `${element.html.slice(0, 97)}...` : element.html;
+      console.log(`    ${element.selector}  ${html}`);
+    }
+    if (violation.elementCount > ELEMENTS_SHOWN) {
+      console.log(`    … and ${violation.elementCount - ELEMENTS_SHOWN} more (see --json)`);
+    }
+  }
+
+  const blocked =
+    result.blockedRequests.length > 0
+      ? ` ${result.blockedRequests.length} request(s) to private or loopback addresses were blocked.`
+      : '';
+  console.log(
+    result.violations.length === 0
+      ? `\nNo accessibility violations found on the page.${blocked}`
+      : `\n${result.totals.rules} rule(s) failed across ${result.totals.elements} element(s).${blocked}`,
+  );
+}
+
+/**
+ * `a11y-autofix scan-url <url>`: whole-page scan, reports only. Exits
+ * non-zero when the page has violations, so it works as a CI check, or
+ * when the URL is refused or can't be scanned.
+ */
+export async function runScanUrl(
+  url: string,
+  options: CliScanUrlOptions = {},
+): Promise<PageScanResult | null> {
+  const { json, ...scanOptions } = options;
+  let result: PageScanResult;
+  try {
+    result = await scanUrl(url, scanOptions);
+  } catch (error) {
+    const known =
+      error instanceof UrlNotAllowedError ||
+      error instanceof PageScanTimeoutError ||
+      error instanceof BrowserUnavailableError;
+    const message = known
+      ? (error as Error).message
+      : `Could not scan ${url}: ${(error as Error).message}`;
+    console.error(json ? JSON.stringify({ error: message }) : message);
+    process.exitCode = 1;
+    return null;
+  }
+  if (json) console.log(JSON.stringify(result, null, 2));
+  else printPageScan(result);
+  if (result.violations.length > 0) process.exitCode = 1;
+  return result;
+}
+
+/** Commander parser for a millisecond option (0 or more). */
+function nonNegativeInteger(value: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0)
+    throw new Error(`expected a whole number of milliseconds, got "${value}"`);
+  return number;
+}
+
 /* c8 ignore start -- exercised via the actual CLI binary, not unit tests */
 /** Commander collector for a repeatable option: `--ignore a --ignore b` gives `['a', 'b']`. */
 function collect(value: string, previous: string[] | undefined): string[] {
@@ -531,6 +614,50 @@ function main(): void {
       const { disableRule, ...rest } = options;
       await runScan(targetPath, { ...rest, ...(disableRule ? { disableRules: disableRule } : {}) });
     });
+
+  program
+    .command('scan-url')
+    .description(
+      'Scan a whole live or local page in headless Chromium, including document-level rules (lang, title, landmarks, skip links). Reports only: no fixes are generated.',
+    )
+    .argument('<url>', 'an http(s) URL')
+    .option('--json', 'print the full result as JSON')
+    .option('--scroll', 'scroll through the page first, to trigger lazy-loaded content (no clicks)')
+    .option(
+      '--timeout <ms>',
+      'overall time limit in milliseconds (default 30000)',
+      nonNegativeInteger,
+    )
+    .option(
+      '--settle <ms>',
+      'extra wait after the network goes idle (default 1000)',
+      nonNegativeInteger,
+    )
+    .option(
+      '--allow-host <host>',
+      'let the scan reach this private or loopback host, e.g. localhost:3000 for a dev server (repeatable; everything else private stays blocked)',
+      collect,
+    )
+    .action(
+      async (
+        url: string,
+        options: {
+          json?: boolean;
+          scroll?: boolean;
+          timeout?: number;
+          settle?: number;
+          allowHost?: string[];
+        },
+      ) => {
+        await runScanUrl(url, {
+          ...(options.json ? { json: true } : {}),
+          ...(options.scroll ? { scroll: true } : {}),
+          ...(options.timeout !== undefined ? { timeoutMs: options.timeout } : {}),
+          ...(options.settle !== undefined ? { settleMs: options.settle } : {}),
+          ...(options.allowHost ? { allowHosts: options.allowHost } : {}),
+        });
+      },
+    );
 
   program
     .command('report')
