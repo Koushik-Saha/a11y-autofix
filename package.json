@@ -1,6 +1,6 @@
 {
   "name": "a11y-autofix",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Scans React and Vue components with axe-core, generates verified WCAG fix diffs via the Claude API, and re-runs axe-core to confirm each fix before showing it to you.",
   "keywords": [
     "accessibility",
