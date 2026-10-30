@@ -1150,6 +1150,55 @@ settings }`. `apiKeyEnv` is passed to `generateFix` only when set
       pass/fail per case, not per acceptance rate; detect-only regressions
       show as "missing".
 
+- [x] Sibling insertion (2026-10-30): `Patch` (now in
+      `src/generate/patch.ts`) gains `kind` ('replace' or 'insert';
+      absent means replace), `insertion` (anchor, position 'before' or
+      'after', snippet, anchorSnippet) and `fallback` (preferred:
+      'insert', reason). An insertion is still one contiguous edit:
+      `newSnippet` = `composeInsertion(...)` (new element, newline plus
+      the anchor line's indentation when the anchor starts its line, then
+      the anchor, or the reverse for 'after'), replacing the anchor's
+      range. So `applyPatchToSource`, the CLI diff and `--write`, the
+      Action's suggestions and the VS Code extension needed no change.
+      `INSERTION_RULES` = `label` (may insert `<label>`) and `bypass` (`<a>`,
+      `<h1>`–`<h6>`; page-level, so a component never reports it today).
+      generate/ sends the old one-field schema for every other rule; for
+      an allowlisted rule it sends an insertion-capable schema (kind,
+      newSnippet, insertPosition, insertedSnippet, fallbackReason), unless
+      no sibling can go there or the previous attempt was a rejected
+      insertion. Then it sends the one-field schema and records the
+      fallback. context/ adds `labelTarget` for `label` only: the input's
+      id (static, dynamic expression, or none), other literal ids in the
+      file, `htmlFor`/`for`, and `canInsertSibling` (React: direct child
+      of a JSX element or fragment; Vue: no v-if/v-else/v-for). verify/
+      `validateInsertion` throws `InvalidPatchError` for a disallowed
+      rule or element, an anchor ≠ position, an anchor whose tag changed,
+      or a `newSnippet` that isn't the composed parts. It also treats new
+      `duplicate-id-aria` "needs review" results as new violations for
+      insertions (detect/'s opt-in `reviewRules`). axe-core 4.13 doesn't
+      report that rule as a violation, so a duplicated label target would
+      otherwise pass. An interactive edit of an insertion becomes a plain
+      replacement of the same range. The CLI prints the kind for
+      insertions and fallbacks (replacement output unchanged); the
+      corrections log records `kind`. Also fixed in context/: an element
+      axe targets by a bare `#id` selector (any element with a unique id)
+      couldn't be located; the tag now comes from axe's HTML. Tests:
+      `test/insertion.test.ts` (fixtures `LabelInsertNoId.tsx`,
+      `LabelInsertWithId.tsx`, `LabelInsertDuplicateId.tsx`,
+      `VueLabelInsert.vue`; real `<label>` verified first try, existing
+      id, Vue `for`, the duplicate-id rejection then aria-label fallback
+      in jsdom and Chromium, wrong `htmlFor` still flagged, five malformed
+      insertions refused, `--write`/`--json`/log kind, edit → replace, and
+      a regression check that every existing fixture's non-label
+      violations get the one-field schema and a plain replace patch).
+      **Limitations:** the anchor is always the flagged element (no
+      "related element" anchors yet); the duplicate-id check is for
+      insertions only (a replacement that duplicates an id isn't caught,
+      as before); `idsInFile` only sees literal ids in this file; an
+      insertion that doesn't compile errors the violation instead of
+      falling back, same as a replacement that doesn't compile; no
+      real-model run.
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal
@@ -1234,6 +1283,14 @@ a decision: either accept `aria-label` as the standing fix for `label`
 `context`/`generate`/`verify` to support adding a sibling node for this
 rule specifically (bigger change, affects the "one element only" guarantee
 the rest of the system leans on).
+
+_Applied 2026-10-30:_ took the second option, for an allowlist of rules
+(`label`, `bypass`). A patch can now be an insertion of one sibling next
+to the flagged element, and the prompt says so for those rules only; a
+real `<label>` is the preferred `label` fix, with `aria-label` as the
+recorded fallback. Every other rule keeps the replacement-only schema, so
+the "one element" guarantee is unchanged for them. See the "Sibling
+insertion" Done entry.
 
 **3. `image-alt` / `button-name` — quality is bounded by what's actually in
 context, not by prompt wording.** Both need Claude to _know_ what the

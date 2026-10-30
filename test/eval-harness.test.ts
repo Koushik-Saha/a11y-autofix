@@ -58,7 +58,15 @@ function fakeModel(request: { messages: { content: string }[] }) {
     newSnippet = element.replace('<input ', '<input aria-label="Email" ');
   // button-name: never fixed, so both attempts are rejected.
   return {
-    parsed_output: { newSnippet },
+    // Answered as a replacement. The extra fields are what an
+    // insertion-capable request (label) expects; others ignore them.
+    parsed_output: {
+      kind: 'replace',
+      newSnippet,
+      insertPosition: null,
+      insertedSnippet: null,
+      fallbackReason: 'eval test: replacement only',
+    },
     stop_reason: 'end_turn',
     model: 'claude-opus-5',
     usage: USAGE,

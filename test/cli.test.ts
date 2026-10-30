@@ -254,6 +254,7 @@ describe('runScan --interactive / --log-corrections', () => {
     const entry = JSON.parse(readFileSync(logPath, 'utf8').trim());
     expect(entry.action).toBe('rejected');
     expect(entry.violationId).toBe('image-alt');
+    expect(entry.kind).toBe('replace');
     expect(entry.suggested).toBe(GOOD_FIX);
     expect(entry.edited).toBeUndefined();
 

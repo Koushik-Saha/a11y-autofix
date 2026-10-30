@@ -12,6 +12,13 @@
  * one's patch touches only its own element — and verification only holds
  * a patch responsible for violations on that element, not for identical
  * ones elsewhere in the file that have patches of their own.
+ *
+ * An insertion patch (`kind: 'insert'`) is checked with the same rigor
+ * plus more: its parts must be consistent and allowed for the rule (see
+ * `validateInsertion`), and any id it makes non-unique that a label or
+ * ARIA attribute points at fails it. axe-core reports that case
+ * (`duplicate-id-aria`) only as "needs review", so it's asked for
+ * explicitly.
  */
 
 import { readFileSync } from 'node:fs';
@@ -21,7 +28,69 @@ import { locateElements } from '../context';
 import type { SourceRange } from '../context';
 import type { AxeViolation } from '../detect';
 import { detectViolationsInSource } from '../detect';
-import type { Patch } from '../generate';
+import type { Patch } from '../generate/patch';
+import {
+  INSERTION_RULES,
+  composeInsertion,
+  insertionSeparator,
+  openingTagName,
+} from '../generate/patch';
+
+/** Checked for insertion patches only: ids a label or ARIA attribute points at must stay unique. */
+const INSERTION_REVIEW_RULES = ['duplicate-id-aria'];
+
+/** An insertion patch whose parts are inconsistent or not allowed for its rule. */
+export class InvalidPatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidPatchError';
+  }
+}
+
+/**
+ * Throws `InvalidPatchError` unless an insertion patch is well-formed:
+ * its rule allows insertion, of this element; its anchor is the patched
+ * range; the anchor keeps its tag; and `newSnippet` is exactly the
+ * inserted element and anchor composed as generate/ composes them.
+ * Replacement patches pass through untouched.
+ */
+export function validateInsertion(source: string, patch: Patch): void {
+  if ((patch.kind ?? 'replace') === 'replace') {
+    if (patch.insertion) {
+      throw new InvalidPatchError(
+        `A replacement patch for "${patch.violationId}" has insertion details.`,
+      );
+    }
+    return;
+  }
+  const { insertion } = patch;
+  const fail = (why: string) => {
+    throw new InvalidPatchError(`Invalid insertion for "${patch.violationId}": ${why}`);
+  };
+  if (!insertion) return fail('it has no insertion details.');
+  const allowedTags = INSERTION_RULES[patch.violationId];
+  if (!allowedTags) return fail(`insertion isn't allowed for this rule, only replacement.`);
+  if (
+    !patch.position ||
+    insertion.anchor.start !== patch.position.start ||
+    insertion.anchor.end !== patch.position.end
+  ) {
+    return fail('its anchor is not the patched element.');
+  }
+  const insertedTag = openingTagName(insertion.snippet);
+  if (!insertedTag || !allowedTags.includes(insertedTag)) {
+    return fail(
+      `it inserts <${insertedTag ?? '?'}>; this rule allows ${allowedTags.map((tag) => `<${tag}>`).join(', ')}.`,
+    );
+  }
+  if (openingTagName(insertion.anchorSnippet) !== openingTagName(patch.oldSnippet)) {
+    return fail('it changes the flagged element into a different element.');
+  }
+  const expected = composeInsertion(insertion, insertionSeparator(source, patch.position.start));
+  if (patch.newSnippet !== expected) {
+    return fail('its newSnippet is not the inserted element and the anchor, composed.');
+  }
+}
 
 export type VerificationStatus = 'verified' | 'unverified';
 
@@ -187,6 +256,19 @@ function attributeToPatch(options: Attribution): AxeViolation[] {
   });
 }
 
+/**
+ * "Needs review" `duplicate-id-aria` nodes present after the patch but not
+ * before (compared by their HTML), returned as violations: an id the
+ * patch made non-unique.
+ */
+function newlyDuplicatedIds(before: AxeViolation[], after: AxeViolation[]): AxeViolation[] {
+  const seen = new Set(before.flatMap((result) => result.nodes.map((node) => node.html)));
+  return after.flatMap((result) => {
+    const nodes = result.nodes.filter((node) => !seen.has(node.html));
+    return nodes.length > 0 ? [{ ...result, nodes }] : [];
+  });
+}
+
 export async function verifyFix(options: VerifyFixOptions): Promise<VerificationResult> {
   const { patch, originalViolation } = options;
   const browser = Boolean(options.browser);
@@ -201,13 +283,26 @@ export async function verifyFix(options: VerifyFixOptions): Promise<Verification
   const filePath = path.resolve(patch.filePath);
 
   const originalSource = readFileSync(filePath, 'utf8');
+  const isInsertion = patch.kind === 'insert';
+  if (isInsertion) validateInsertion(originalSource, patch);
   const patchedSource = applyPatchToSource(originalSource, { ...patch, filePath });
+  const reviewRules = isInsertion ? INSERTION_REVIEW_RULES : [];
 
   // Sequential, not Promise.all: each render swaps process-wide globals
   // (see detect/'s withJsdomEnvironment) for its duration, so two renders
   // can't safely run concurrently in this process.
-  const before = await detectViolationsInSource({ source: originalSource, filePath, browser });
-  const after = await detectViolationsInSource({ source: patchedSource, filePath, browser });
+  const before = await detectViolationsInSource({
+    source: originalSource,
+    filePath,
+    browser,
+    reviewRules,
+  });
+  const after = await detectViolationsInSource({
+    source: patchedSource,
+    filePath,
+    browser,
+    reviewRules,
+  });
 
   const beforeRuleIds = new Set(before.violations.map((violation) => violation.id));
   const remainingViolations = patch.position
@@ -222,7 +317,10 @@ export async function verifyFix(options: VerifyFixOptions): Promise<Verification
         newSnippet: patch.newSnippet,
       })
     : after.violations.filter((violation) => violation.id === originalViolation.id);
-  const newViolations = after.violations.filter((violation) => !beforeRuleIds.has(violation.id));
+  const newViolations = [
+    ...after.violations.filter((violation) => !beforeRuleIds.has(violation.id)),
+    ...newlyDuplicatedIds(before.needsReview ?? [], after.needsReview ?? []),
+  ];
 
   const status: VerificationStatus =
     remainingViolations.length === 0 && newViolations.length === 0 ? 'verified' : 'unverified';

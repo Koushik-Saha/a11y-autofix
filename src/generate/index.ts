@@ -1,7 +1,9 @@
 /**
  * generate/ — sends a FixContext to the Claude API and returns a proposed
- * Patch for the single JSX element located by context/. Output is
- * unverified until verify/ re-runs axe-core against the patched component.
+ * Patch for the single JSX element located by context/: a replacement for
+ * it, or, for the few rules in `INSERTION_RULES`, possibly a new sibling
+ * inserted next to it. Output is unverified until verify/ re-runs
+ * axe-core against the patched component.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -9,7 +11,10 @@ import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
 
 import type { AxeViolation } from '../detect';
-import type { FixContext, ResolvedSourceContext, SourceRange } from '../context';
+import type { FixContext, LabelTargetContext, ResolvedSourceContext } from '../context';
+
+import { composeInsertion, insertionSeparator, isInsertionRule } from './patch';
+import type { Patch, PatchFallback, PatchKind } from './patch';
 
 import {
   buildContrastSection,
@@ -32,23 +37,7 @@ export class NotAutoFixableError extends Error {
   }
 }
 
-export interface Patch {
-  filePath: string;
-  violationId: string;
-  /** The element's exact source text when scanned. With `position`, a check that the file hasn't changed; without it, how the element is found. */
-  oldSnippet: string;
-  newSnippet: string;
-  /**
-   * Where `oldSnippet` sat in the file when it was scanned: character
-   * offsets from context/'s AST (`element.location.startOffset` /
-   * `endOffset`). verify/'s `applyPatchToSource` replaces exactly this
-   * range, so a file with two identical offending elements can have each
-   * fixed separately. Optional only for patches from before it existed
-   * (e.g. a saved `--json` result), which fall back to requiring
-   * `oldSnippet` to occur exactly once.
-   */
-  position?: SourceRange;
-}
+export * from './patch';
 
 /**
  * A rejected prior attempt, fed back into a retry so the model can address
@@ -58,6 +47,8 @@ export interface Patch {
  */
 export interface PreviousAttempt {
   newSnippet: string;
+  /** 'insert' when the rejected attempt inserted an element: the retry then only offers a replacement. */
+  kind?: PatchKind;
   remainingViolations: AxeViolation[];
   newViolations: AxeViolation[];
 }
@@ -108,11 +99,46 @@ const PatchSuggestionSchema = z.object({
     ),
 });
 
+/**
+ * Offered instead of `PatchSuggestionSchema` only for a rule in
+ * `INSERTION_RULES`, when an insertion is possible there. For every other
+ * rule the request schema is exactly as before, so an insertion can't
+ * even be expressed.
+ */
+const InsertionSuggestionSchema = z.object({
+  kind: z
+    .enum(['insert', 'replace'])
+    .describe(
+      '"insert" to add one new element next to the offending element; "replace" to replace the offending element only.',
+    ),
+  newSnippet: z
+    .string()
+    .describe(
+      'For "replace": the corrected element, as a drop-in replacement. For "insert": the offending element as it should read after the change — unchanged, or with only the attribute the new element needs added (such as an id). Never include the inserted element here.',
+    ),
+  insertPosition: z
+    .enum(['before', 'after'])
+    .nullable()
+    .describe(
+      'For "insert": where the new element goes relative to the offending element. Null for "replace".',
+    ),
+  insertedSnippet: z
+    .string()
+    .nullable()
+    .describe('For "insert": the one new element to insert, complete. Null for "replace".'),
+  fallbackReason: z
+    .string()
+    .nullable()
+    .describe('For "replace": why an insertion was not used. Null for "insert".'),
+});
+
 const SYSTEM_PROMPT = `You fix a single WCAG accessibility violation in a React JSX element.
 
 You are shown the exact JSX element that failed an axe-core rule, its immediate parent, its sibling elements, and (when available) the component's prop types — all for context only.
 
 Return only a replacement for that one element. It must be a drop-in substitute: same tag, same children unless the fix requires changing them, and every prop or event handler unrelated to the violation left untouched. Do not touch the parent, the siblings, or anything else in the file. Do not reformat, rename, or refactor code that isn't part of the fix.
+
+The one exception is insertion, allowed only for the rules label and bypass, and only when the request's output format offers it: you may insert one new element directly before or after the flagged element (for label, a real <label> element naming the field) instead of replacing it. The flagged element may then change only by gaining the attribute the new element needs, such as the id a label points at; existing siblings stay untouched. For every other rule insertion is not allowed, and replacement remains the default.
 
 When the fix needs new text — alt text, an aria-label, a form label — write something specific and meaningful based on the surrounding context, not a generic placeholder like "image" or "TODO".
 
@@ -152,6 +178,85 @@ function buildResolvedSection(resolved: ResolvedSourceContext): string {
           '```',
         ].join('\n'),
       ),
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Whether this request may return an insertion. When it can't for a rule
+ * that prefers one, `fallbackReason` says why; the patch records it.
+ */
+type InsertionOffer = { offered: true } | { offered: false; fallbackReason: string | null };
+
+function insertionOffer(
+  context: FixContext,
+  previousAttempt: PreviousAttempt | undefined,
+): InsertionOffer {
+  if (!isInsertionRule(context.violation.id)) return { offered: false, fallbackReason: null };
+  if (context.labelTarget && !context.labelTarget.canInsertSibling) {
+    return {
+      offered: false,
+      fallbackReason:
+        "a <label> can't be inserted next to this element: it isn't a direct child of another element (e.g. it's a component's root, inside an expression, or in a v-if/v-for)",
+    };
+  }
+  if (previousAttempt?.kind === 'insert') {
+    const why = [
+      ...previousAttempt.remainingViolations.map((v) => `still flagged: ${v.id}`),
+      ...previousAttempt.newViolations.map((v) => `introduced: ${v.id}`),
+    ].join(', ');
+    return {
+      offered: false,
+      fallbackReason: `the inserted element did not verify${why ? ` (${why})` : ''}`,
+    };
+  }
+  return { offered: true };
+}
+
+function describeId(labelTarget: LabelTargetContext): string {
+  const { id } = labelTarget;
+  if (id.kind === 'static') return `its id is "${id.value}"`;
+  if (id.kind === 'dynamic') return `its id is set dynamically: {${id.expression}}`;
+  return 'it has no id';
+}
+
+/** What a label fix needs to know about the input, and which fix is wanted. */
+function buildLabelSection(labelTarget: LabelTargetContext, offer: InsertionOffer): string {
+  const attr = labelTarget.forAttribute;
+  const ids =
+    labelTarget.idsInFile.length > 0
+      ? labelTarget.idsInFile.map((value) => `"${value}"`).join(', ')
+      : 'none';
+  const lines = [
+    '',
+    'Labeling this input (context only):',
+    `- The input: ${describeId(labelTarget)}.`,
+    `- Ids already used by other elements in this file (a new id must not repeat one): ${ids}.`,
+  ];
+  if (offer.offered) {
+    const target =
+      labelTarget.id.kind === 'static'
+        ? `${attr}="${labelTarget.id.value}"`
+        : labelTarget.id.kind === 'dynamic'
+          ? attr === 'for'
+            ? `:for="${labelTarget.id.expression}"`
+            : `${attr}={${labelTarget.id.expression}}`
+          : `${attr} set to a new id`;
+    lines.push(
+      `- Preferred fix: insert a real <label> element before the input, with ${target} and visible text naming the field (kind "insert").`,
+    );
+    if (labelTarget.id.kind === 'none') {
+      lines.push(
+        '- The input has no id, so the fix is two parts: add a new, unique id to the input (its only change, in newSnippet) and insert the <label> pointing at it.',
+      );
+    }
+    lines.push(
+      '- Only if a visible label genuinely cannot work here, return kind "replace" with an aria-label on the input, and say why in fallbackReason.',
+    );
+  } else if (!offer.offered && offer.fallbackReason) {
+    lines.push(
+      `- A <label> can't be used for this attempt: ${offer.fallbackReason}. Return a replacement for the input that adds an aria-label instead.`,
     );
   }
   return lines.join('\n');
@@ -229,6 +334,7 @@ function buildUserPrompt(
   context: FixContext,
   previousAttempt: PreviousAttempt | undefined,
   contrastPlan: ContrastPlan | null,
+  offer: InsertionOffer,
 ): string {
   const { violation, element, parent, siblings, propTypes, resolved } = context;
   const violationNode = violation.nodes[0];
@@ -253,6 +359,7 @@ function buildUserPrompt(
       : null,
     propTypes ? `\nComponent prop types (context only):\n\`\`\`ts\n${propTypes}\n\`\`\`` : null,
     resolved ? buildResolvedSection(resolved) : null,
+    context.labelTarget ? buildLabelSection(context.labelTarget, offer) : null,
     contrastPlan ? buildContrastSection(contrastPlan.measurement, contrastPlan.suggestion) : null,
     previousAttempt ? buildRetrySection(previousAttempt) : null,
   ];
@@ -279,41 +386,104 @@ export async function generateFix(options: GenerateFixOptions): Promise<Patch> {
   } else {
     client = new Anthropic();
   }
-  const response = await client.messages.parse({
+  const offer = insertionOffer(context, previousAttempt);
+  const request = {
     model: 'claude-opus-5',
     max_tokens: 8000,
-    thinking: { type: 'adaptive' },
+    thinking: { type: 'adaptive' as const },
     system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: buildUserPrompt(context, previousAttempt, contrastPlan) }],
-    output_config: { format: zodOutputFormat(PatchSuggestionSchema) },
-  });
-
-  onUsage?.(
-    {
-      model: response.model,
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      thinkingTokens: response.usage.output_tokens_details?.thinking_tokens ?? null,
-      cacheCreationInputTokens: response.usage.cache_creation_input_tokens ?? 0,
-      cacheReadInputTokens: response.usage.cache_read_input_tokens ?? 0,
-    },
-    context,
-  );
-
-  if (!response.parsed_output) {
-    throw new Error(
-      `Claude did not return a parsable patch for violation "${context.violation.id}" (stop_reason: ${response.stop_reason})`,
+    messages: [
+      {
+        role: 'user' as const,
+        content: buildUserPrompt(context, previousAttempt, contrastPlan, offer),
+      },
+    ],
+  };
+  const reportUsage = (response: Pick<Anthropic.Message, 'model' | 'usage'>) =>
+    onUsage?.(
+      {
+        model: response.model,
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+        thinkingTokens: response.usage.output_tokens_details?.thinking_tokens ?? null,
+        cacheCreationInputTokens: response.usage.cache_creation_input_tokens ?? 0,
+        cacheReadInputTokens: response.usage.cache_read_input_tokens ?? 0,
+      },
+      context,
     );
-  }
+  const unparsable = (stopReason: string | null) =>
+    new Error(
+      `Claude did not return a parsable patch for violation "${context.violation.id}" (stop_reason: ${stopReason})`,
+    );
 
-  return {
+  const base = {
     filePath: context.componentPath,
     violationId: context.violation.id,
     oldSnippet: context.element.code,
-    newSnippet: response.parsed_output.newSnippet,
     position: {
       start: context.element.location.startOffset,
       end: context.element.location.endOffset,
     },
+  };
+
+  if (!offer.offered) {
+    const response = await client.messages.parse({
+      ...request,
+      output_config: { format: zodOutputFormat(PatchSuggestionSchema) },
+    });
+    reportUsage(response);
+    if (!response.parsed_output) throw unparsable(response.stop_reason);
+    const fallback: PatchFallback | null = offer.fallbackReason
+      ? { preferred: 'insert', reason: offer.fallbackReason }
+      : null;
+    return {
+      ...base,
+      kind: 'replace',
+      newSnippet: response.parsed_output.newSnippet,
+      ...(fallback ? { fallback } : {}),
+    };
+  }
+
+  const response = await client.messages.parse({
+    ...request,
+    output_config: { format: zodOutputFormat(InsertionSuggestionSchema) },
+  });
+  reportUsage(response);
+  const suggestion = response.parsed_output;
+  if (!suggestion) throw unparsable(response.stop_reason);
+
+  if (suggestion.kind === 'replace') {
+    return {
+      ...base,
+      kind: 'replace',
+      newSnippet: suggestion.newSnippet,
+      fallback: {
+        preferred: 'insert',
+        reason:
+          suggestion.fallbackReason?.trim() ||
+          'the model returned a replacement without saying why',
+      },
+    };
+  }
+
+  if (!suggestion.insertPosition || !suggestion.insertedSnippet?.trim()) {
+    throw new Error(
+      `Claude returned an insertion for violation "${context.violation.id}" without ${suggestion.insertPosition ? 'the element to insert' : 'a position (before/after)'}.`,
+    );
+  }
+  const insertion = {
+    anchor: base.position,
+    position: suggestion.insertPosition,
+    snippet: suggestion.insertedSnippet,
+    anchorSnippet: suggestion.newSnippet,
+  };
+  return {
+    ...base,
+    kind: 'insert',
+    newSnippet: composeInsertion(
+      insertion,
+      insertionSeparator(context.sourceCode, base.position.start),
+    ),
+    insertion,
   };
 }

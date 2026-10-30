@@ -259,6 +259,7 @@ export async function resolveFix(
 
   const retry = await attemptFix(context, violation, options, {
     newSnippet: first.patch.newSnippet,
+    kind: first.patch.kind ?? 'replace',
     remainingViolations: first.verification.remainingViolations,
     newViolations: first.verification.newViolations,
   });
@@ -374,7 +375,14 @@ async function runInteractiveDecision(
     }
 
     // decision.action === 'edit'
-    const editedPatch: ScoredPatch = { ...latestAttempt, newSnippet: decision.newSnippet };
+    // The caller's text replaces the element's range as a whole, so it's a
+    // plain replacement, whatever kind the suggestion was.
+    const { insertion: _insertion, fallback: _fallback, ...edited } = latestAttempt;
+    const editedPatch: ScoredPatch = {
+      ...edited,
+      kind: 'replace',
+      newSnippet: decision.newSnippet,
+    };
     const editedVerification = await verifyFix({
       patch: editedPatch,
       originalViolation: violation,

@@ -13,13 +13,15 @@ import type { JsxElement, JsxSelfClosingElement, SourceFile } from 'ts-morph';
 import { Node, Project, SyntaxKind } from 'ts-morph';
 
 import type { AxeNodeResult } from '../../detect';
-import { parseHtmlAttributes, parseSelector } from './axe-selector';
+import { parseHtmlAttributes, parseSelector, tagNameFromHtml } from './axe-selector';
 import { SourceResolver } from './resolve';
 import type { PropReference, ResolvedSourceContext } from './resolve';
 import type {
+  ElementFacts,
   FrameworkAdapter,
   FrameworkElementContext,
   GatherElementContextOptions,
+  IdAttribute,
   JsxElementSnapshot,
   LocateElementsOptions,
   SourceRange,
@@ -106,7 +108,8 @@ function locateJsxElement(sourceFile: SourceFile, node: AxeNodeResult): JsxEleme
 
   const segments = parseSelector(targetSelector);
   const leaf = segments[segments.length - 1];
-  if (!leaf?.tagName) {
+  const leafTag = leaf?.tagName ?? tagNameFromHtml(node.html);
+  if (!leaf || !leafTag) {
     throw new Error(`Could not parse a tag name out of selector "${targetSelector}"`);
   }
   const parentSegment = segments.length > 1 ? segments[segments.length - 2] : undefined;
@@ -116,7 +119,7 @@ function locateJsxElement(sourceFile: SourceFile, node: AxeNodeResult): JsxEleme
     ...sourceFile.getDescendantsOfKind(SyntaxKind.JsxSelfClosingElement),
   ];
 
-  let candidates = allElements.filter((el) => getTagName(el).toLowerCase() === leaf.tagName);
+  let candidates = allElements.filter((el) => getTagName(el).toLowerCase() === leafTag);
 
   if (leaf.nthChild !== null) {
     candidates = candidates.filter((el) => getElementSiblingIndex(el) === leaf.nthChild);
@@ -258,6 +261,50 @@ function propReferences(element: JsxElementLike): PropReference[] {
   });
 }
 
+/** A JSX attribute's value when it is a plain string (`id="x"` or `id={'x'}`), else null. */
+function literalAttributeValue(attribute: Node): string | null {
+  if (!Node.isJsxAttribute(attribute)) return null;
+  const initializer = attribute.getInitializer();
+  if (initializer && Node.isStringLiteral(initializer)) return initializer.getLiteralValue();
+  if (initializer && Node.isJsxExpression(initializer)) {
+    const expression = initializer.getExpression();
+    if (expression && Node.isStringLiteral(expression)) return expression.getLiteralValue();
+    if (expression && Node.isNoSubstitutionTemplateLiteral(expression)) {
+      return expression.getLiteralValue();
+    }
+  }
+  return null;
+}
+
+function idAttributeOf(element: JsxElementLike): IdAttribute {
+  const opening = Node.isJsxElement(element) ? element.getOpeningElement() : element;
+  const attribute = opening.getAttribute('id');
+  if (!attribute || !Node.isJsxAttribute(attribute)) return { kind: 'none' };
+  const value = literalAttributeValue(attribute);
+  if (value !== null) return { kind: 'static', value };
+  const initializer = attribute.getInitializer();
+  const expression =
+    initializer && Node.isJsxExpression(initializer) ? initializer.getExpression() : undefined;
+  return expression ? { kind: 'dynamic', expression: expression.getText() } : { kind: 'none' };
+}
+
+function elementFacts(sourceFile: SourceFile, element: JsxElementLike): ElementFacts {
+  const opening = Node.isJsxElement(element) ? element.getOpeningElement() : element;
+  const ownId = opening.getAttribute('id');
+  const idsInFile = new Set<string>();
+  for (const attribute of sourceFile.getDescendantsOfKind(SyntaxKind.JsxAttribute)) {
+    if (attribute === ownId || attribute.getNameNode().getText() !== 'id') continue;
+    const value = literalAttributeValue(attribute);
+    if (value !== null) idsInFile.add(value);
+  }
+  const parent = element.getParent();
+  return {
+    id: idAttributeOf(element),
+    idsInFile: [...idsInFile].sort(),
+    canInsertSibling: Boolean(parent && (Node.isJsxElement(parent) || Node.isJsxFragment(parent))),
+  };
+}
+
 /** Best-effort: any failure means no resolved context, never a failed gatherContext. */
 function resolveElement(
   element: JsxElementLike,
@@ -292,6 +339,7 @@ function gatherElementContext(options: GatherElementContextOptions): FrameworkEl
     siblings: siblings.map((sibling) => toSnapshot(sibling, componentPath, offsetShift)),
     propTypes: extractPropTypes(sourceFile),
     ...(resolved ? { resolved } : {}),
+    facts: elementFacts(sourceFile, element),
   };
 }
 

@@ -133,11 +133,16 @@ const PAGE_HTML =
 
 type MountOutcome = { ok: true } | { ok: false; error: string };
 
-/** Renders the component in a fresh page and returns axe-core's raw violations. */
+/**
+ * Renders the component in a fresh page and returns axe-core's raw
+ * violations, plus its "needs review" (incomplete) results for any rule in
+ * `reviewRules`.
+ */
 export async function runAxeInBrowser(
   adapter: RenderAdapter,
   options: RenderOptions,
-): Promise<AxeResult[]> {
+  reviewRules: readonly string[] = [],
+): Promise<{ violations: AxeResult[]; incomplete: AxeResult[] }> {
   const bundle = await adapter.bundleForBrowser(options);
 
   return withBrowser(async (browser) => {
@@ -168,30 +173,39 @@ export async function runAxeInBrowser(
       }
 
       await page.addScriptTag({ content: axe.source });
-      return await page.evaluate(async (containerKey) => {
-        const win = globalThis as unknown as Record<string, unknown>;
-        const pageAxe = win.axe as typeof axe;
-        // Full default ruleset — nothing disabled, unlike the jsdom path.
-        const results = await pageAxe.run(win[containerKey] as Parameters<typeof axe.run>[0], {
-          resultTypes: ['violations'],
-        });
-        return results.violations.map((violation) => ({
-          id: violation.id,
-          impact: violation.impact,
-          tags: violation.tags,
-          description: violation.description,
-          help: violation.help,
-          helpUrl: violation.helpUrl,
-          nodes: violation.nodes.map((node) => ({
-            target: node.target,
-            html: node.html,
-            failureSummary: node.failureSummary,
-            any: [],
-            all: [],
-            none: [],
-          })),
-        })) as AxeResult[];
-      }, CONTAINER_GLOBAL);
+      return await page.evaluate(
+        async ({ containerKey, reviewRules }) => {
+          const win = globalThis as unknown as Record<string, unknown>;
+          const pageAxe = win.axe as typeof axe;
+          // Full default ruleset — nothing disabled, unlike the jsdom path.
+          const results = await pageAxe.run(win[containerKey] as Parameters<typeof axe.run>[0], {
+            resultTypes: reviewRules.length > 0 ? ['violations', 'incomplete'] : ['violations'],
+          });
+          const serialize = (violation: (typeof results.violations)[number]) => ({
+            id: violation.id,
+            impact: violation.impact,
+            tags: violation.tags,
+            description: violation.description,
+            help: violation.help,
+            helpUrl: violation.helpUrl,
+            nodes: violation.nodes.map((node) => ({
+              target: node.target,
+              html: node.html,
+              failureSummary: node.failureSummary,
+              any: [],
+              all: [],
+              none: [],
+            })),
+          });
+          return {
+            violations: results.violations.map(serialize) as AxeResult[],
+            incomplete: results.incomplete
+              .filter((result) => reviewRules.includes(result.id))
+              .map(serialize) as AxeResult[],
+          };
+        },
+        { containerKey: CONTAINER_GLOBAL, reviewRules: [...reviewRules] },
+      );
     } finally {
       await context.close();
     }

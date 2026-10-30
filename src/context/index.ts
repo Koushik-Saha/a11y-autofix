@@ -27,11 +27,28 @@ export type {
   JsxSourceLocation,
   FrameworkAdapter,
   LocateElementsOptions,
+  IdAttribute,
   ResolvedHandler,
   ResolvedSourceContext,
   ResolvedValue,
   SourceRange,
 } from './adapters/types';
+import type { IdAttribute } from './adapters/types';
+
+/**
+ * What a `label` fix needs to add a real `<label>`: the input's id (or
+ * that it has none, so the fix must add one), ids it must not reuse, the
+ * attribute that points a label at it, and whether a sibling can go next
+ * to it at all.
+ */
+export interface LabelTargetContext {
+  id: IdAttribute;
+  /** Literal ids on other elements in this file. Components it renders may add more that aren't visible here. */
+  idsInFile: string[];
+  /** `htmlFor` in JSX, `for` in a Vue template. */
+  forAttribute: 'htmlFor' | 'for';
+  canInsertSibling: boolean;
+}
 
 export interface FixContext {
   violation: AxeViolation;
@@ -49,6 +66,8 @@ export interface FixContext {
    * Absent when nothing could be resolved — never a guess.
    */
   resolved?: ResolvedSourceContext;
+  /** Present only for `label` violations. */
+  labelTarget?: LabelTargetContext;
 }
 
 export interface GatherContextOptions {
@@ -79,7 +98,7 @@ export async function gatherContext(options: GatherContextOptions): Promise<FixC
 
   const absoluteComponentPath = path.resolve(options.componentPath);
   const adapter = findAdapter(absoluteComponentPath);
-  const elementContext = adapter.gatherElementContext({
+  const { facts, ...elementContext } = adapter.gatherElementContext({
     componentPath: absoluteComponentPath,
     violationNode,
   });
@@ -89,6 +108,14 @@ export async function gatherContext(options: GatherContextOptions): Promise<FixC
     componentPath: absoluteComponentPath,
     relatedFiles: [],
     ...elementContext,
+    ...(violation.id === 'label'
+      ? {
+          labelTarget: {
+            ...facts,
+            forAttribute: adapter.id === 'vue' ? ('for' as const) : ('htmlFor' as const),
+          },
+        }
+      : {}),
   };
 }
 

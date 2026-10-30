@@ -85,6 +85,13 @@ export interface DetectResult {
   files: DetectedFile[];
   /** Violations from all of `files`, each tagged with its `filePath`. */
   violations: AxeViolation[];
+  /**
+   * axe-core's "needs review" (incomplete) results for the rules asked for
+   * with `DetectInSourceOptions.reviewRules`; absent when none were. Some
+   * checks land here rather than in `violations` — e.g. `duplicate-id-aria`
+   * for an id a `<label>` points at.
+   */
+  needsReview?: AxeViolation[];
 }
 
 /**
@@ -218,11 +225,21 @@ async function renderAndDetectViolations(
   options: RenderOptions,
   browser = false,
 ): Promise<AxeViolation[]> {
+  return (await renderAndCheck(options, browser, [])).violations;
+}
+
+async function renderAndCheck(
+  options: RenderOptions,
+  browser: boolean,
+  reviewRules: readonly string[],
+): Promise<{ violations: AxeViolation[]; needsReview: AxeViolation[] }> {
   const adapter = findAdapter(options.absolutePath);
+  const convert = (results: AxeResult[]) =>
+    results.map((result) => toAxeViolation(result, options.absolutePath));
 
   if (browser) {
-    const violations = await runAxeInBrowser(adapter, options);
-    return violations.map((violation) => toAxeViolation(violation, options.absolutePath));
+    const results = await runAxeInBrowser(adapter, options, reviewRules);
+    return { violations: convert(results.violations), needsReview: convert(results.incomplete) };
   }
 
   return withJsdomEnvironment(async () => {
@@ -235,7 +252,12 @@ async function renderAndDetectViolations(
       const results = await axe.run(container, {
         rules: { 'color-contrast': { enabled: false } },
       });
-      return results.violations.map((violation) => toAxeViolation(violation, options.absolutePath));
+      return {
+        violations: convert(results.violations),
+        needsReview: convert(
+          results.incomplete.filter((result) => reviewRules.includes(result.id)),
+        ),
+      };
     } finally {
       cleanup();
     }
@@ -277,6 +299,8 @@ export interface DetectInSourceOptions {
   filePath: string;
   /** Same as `DetectOptions.browser`. */
   browser?: boolean;
+  /** Also return axe-core's "needs review" results for these rule ids, in `needsReview`. */
+  reviewRules?: readonly string[];
 }
 
 /**
@@ -291,13 +315,16 @@ export async function detectViolationsInSource(
   options: DetectInSourceOptions,
 ): Promise<DetectResult> {
   const absolutePath = path.resolve(options.filePath);
-  const violations = await renderAndDetectViolations(
+  const reviewRules = options.reviewRules ?? [];
+  const { violations, needsReview } = await renderAndCheck(
     { absolutePath, source: options.source },
     Boolean(options.browser),
+    reviewRules,
   );
   return {
     componentPath: absolutePath,
     files: [{ filePath: absolutePath, source: options.source }],
     violations,
+    ...(reviewRules.length > 0 ? { needsReview } : {}),
   };
 }
