@@ -36,6 +36,14 @@ inputs:
       unresolved — see check-unresolved.js.
     required: false
     default: 'false'
+  upload-sarif:
+    description: >-
+      Also upload the results as SARIF to GitHub code scanning, so they
+      appear in the repository's Security tab and as annotations on the
+      pull request. The SARIF is made from the same scan (no second model
+      run). Needs `security-events: write` in the workflow's permissions.
+    required: false
+    default: 'false'
 
 runs:
   using: 'composite'
@@ -78,6 +86,18 @@ runs:
         REVIEW_EVENT: ${{ inputs.review-event }}
         GITHUB_REPOSITORY: ${{ github.repository }}
       run: node "${{ github.action_path }}/action/post-results.js"
+
+    - name: Convert the results to SARIF
+      if: inputs.upload-sarif == 'true'
+      shell: bash
+      run: npx a11y-autofix report "${{ runner.temp }}/a11y-autofix-result.json" --format sarif --output "${{ runner.temp }}/a11y-autofix.sarif"
+
+    - name: Upload SARIF to code scanning
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ runner.temp }}/a11y-autofix.sarif
+        category: a11y-autofix
 
     - name: Fail if unresolved violations remain
       if: inputs.fail-on-unresolved == 'true'

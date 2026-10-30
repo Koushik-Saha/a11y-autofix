@@ -211,3 +211,43 @@ export async function runAxeInBrowser(
     }
   });
 }
+
+/**
+ * Loads a complete HTML document (no component, no bundle) and returns
+ * axe-core's violations for the whole page, full default ruleset. Every
+ * network request is blocked, so a document that depends on external
+ * assets is checked without them.
+ */
+export async function runAxeOnDocumentInBrowser(html: string): Promise<AxeResult[]> {
+  return withBrowser(async (browser) => {
+    const context = await browser.newContext();
+    try {
+      const page = await context.newPage();
+      await page.route('**/*', (route) => route.abort());
+      await page.setContent(html);
+      await page.addScriptTag({ content: axe.source });
+      return await page.evaluate(async () => {
+        const pageAxe = (globalThis as unknown as Record<string, unknown>).axe as typeof axe;
+        const results = await pageAxe.run(document, { resultTypes: ['violations'] });
+        return results.violations.map((violation) => ({
+          id: violation.id,
+          impact: violation.impact,
+          tags: violation.tags,
+          description: violation.description,
+          help: violation.help,
+          helpUrl: violation.helpUrl,
+          nodes: violation.nodes.map((node) => ({
+            target: node.target,
+            html: node.html,
+            failureSummary: node.failureSummary,
+            any: [],
+            all: [],
+            none: [],
+          })),
+        })) as AxeResult[];
+      });
+    } finally {
+      await context.close();
+    }
+  });
+}

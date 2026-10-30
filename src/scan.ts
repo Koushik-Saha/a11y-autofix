@@ -11,12 +11,14 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { createIgnoreMatcher, suppressionReason } from './config';
+import { toHtmlReport, toSarif } from './report';
+import type { ReportFormat, SarifLog } from './report';
 import type { Severity, SuppressionReason } from './config';
 import { detectViolations, resolveComponentFiles } from './detect';
 import type { AxeNodeResult, AxeViolation, DetectedFile } from './detect';
 import { withBrowserSession } from './detect/browser';
 import { gatherContext, locateElements } from './context';
-import type { FixContext } from './context';
+import type { FixContext, JsxSourceLocation, SourceRange } from './context';
 import { generateFix } from './generate';
 import type { GenerationUsage, Patch, PreviousAttempt } from './generate';
 import { StalePatchError, applyPatchToSource, verifyFix } from './verify';
@@ -73,6 +75,12 @@ export interface ScanOptions {
    * unset, the SDK's own default (`ANTHROPIC_API_KEY`) applies.
    */
   apiKeyEnv?: string;
+  /**
+   * Also render the result in these formats, returned in `ScanResult.reports`
+   * (SARIF as an object, HTML as a string). Paths in them are relative to
+   * `root`. Same output as `toSarif` / `toHtmlReport` on the result.
+   */
+  reports?: ReportFormat[];
   /** See `ResolveFixOptions.onAttempt`. */
   onAttempt?: NonNullable<ResolveFixOptions['onAttempt']>;
   /** See `ResolveFixOptions.onUsage`. */
@@ -142,6 +150,8 @@ export interface ScanViolationErrored extends ScanViolationOutcomeBase {
   status: 'errored';
   /** context/generate/verify threw — the pipeline couldn't produce or check a fix for this violation. */
   error: string;
+  /** Where the element is, when context/ located it before the failure. */
+  location?: JsxSourceLocation;
   /**
    * Set when generate/ refused to attempt a fix because guessing would be
    * unsafe (e.g. low contrast over a background image or gradient). Still
@@ -162,6 +172,8 @@ export interface SuppressedViolation {
   /** Narrowed to one source element, like `ScanViolationResult.violation`. */
   violation: AxeViolation;
   reason: SuppressionReason;
+  /** Where the element is, when it could be located. */
+  location?: JsxSourceLocation;
 }
 
 export interface ScanResult {
@@ -172,6 +184,10 @@ export interface ScanResult {
   suppressed: SuppressedViolation[];
   /** Component files under the target skipped by `ignore` (absolute paths, never rendered). */
   ignoredFiles: string[];
+  /** Where components were rendered: jsdom (no color-contrast checks) or headless Chromium. */
+  mode: 'jsdom' | 'browser';
+  /** Present when `ScanOptions.reports` asked for any. */
+  reports?: { sarif?: SarifLog; html?: string };
 }
 
 interface Attempt {
@@ -301,6 +317,39 @@ function splitByElement(file: string, source: string, violation: AxeViolation): 
     if (range) groupByStart.set(range.start, group);
   });
   return groups.map((nodes) => ({ ...violation, nodes }));
+}
+
+/** 1-based line and column of `offset` in `source`, the convention context/ uses. */
+function lineAndColumn(source: string, offset: number): { line: number; column: number } {
+  const before = source.slice(0, offset);
+  const line = before.split('\n').length;
+  return { line, column: offset - (before.lastIndexOf('\n') + 1) + 1 };
+}
+
+/** The suppressed element's location, located the same structural way as everything else; null if it can't be. */
+function locateSuppressed(file: DetectedFile, violation: AxeViolation): JsxSourceLocation | null {
+  let range: SourceRange | null | undefined;
+  try {
+    [range] = locateElements({
+      componentPath: file.filePath,
+      source: file.source,
+      nodes: violation.nodes.slice(0, 1),
+    });
+  } catch {
+    return null;
+  }
+  if (!range) return null;
+  const start = lineAndColumn(file.source, range.start);
+  const end = lineAndColumn(file.source, range.end);
+  return {
+    filePath: file.filePath,
+    startLine: start.line,
+    startColumn: start.column,
+    endLine: end.line,
+    endColumn: end.column,
+    startOffset: range.start,
+    endOffset: range.end,
+  };
 }
 
 function applyToDisk(patch: Patch): void {
@@ -444,9 +493,10 @@ async function fixFile(
     // Split per rule, not all up front: with `write`, fixes already
     // written for earlier rules may have moved this rule's elements.
     for (const violation of splitByElement(file, expectedSource, ruleViolation)) {
+      let context: FixContext | undefined;
       try {
         assertUnchangedSinceScan(file, violation.id, expectedSource);
-        const context = await gatherContext({ violation, componentPath: file });
+        context = await gatherContext({ violation, componentPath: file });
         const resolved = await resolveFix(context, violation, options);
 
         let patch = resolved.patch;
@@ -486,6 +536,7 @@ async function fixFile(
           filePath: file,
           violation,
           error: (error as Error).message,
+          ...(context ? { location: context.element.location } : {}),
           // By name rather than instanceof generate/'s NotAutoFixableError, so
           // it holds even when generate/ is loaded twice or mocked.
           ...((error as Error)?.name === 'NotAutoFixableError'
@@ -547,7 +598,13 @@ export async function scan(targetPath: string, options: ScanOptions = {}): Promi
         }
         // Counted per source element, the same unit as `violations`.
         for (const element of splitByElement(file.filePath, file.source, violation)) {
-          suppressed.push({ filePath: file.filePath, violation: element, reason });
+          const location = locateSuppressed(file, element);
+          suppressed.push({
+            filePath: file.filePath,
+            violation: element,
+            reason,
+            ...(location ? { location } : {}),
+          });
         }
       }
       violations.push(...(await fixFile(file, toFix, options)));
@@ -555,5 +612,21 @@ export async function scan(targetPath: string, options: ScanOptions = {}): Promi
   };
   await (options.browser ? withBrowserSession(scanAll) : scanAll());
 
-  return { targetPath: absoluteTarget, filesScanned, violations, suppressed, ignoredFiles };
+  const result: ScanResult = {
+    targetPath: absoluteTarget,
+    filesScanned,
+    violations,
+    suppressed,
+    ignoredFiles,
+    mode: options.browser ? 'browser' : 'jsdom',
+  };
+  const formats = options.reports ?? [];
+  if (formats.length > 0) {
+    const root = options.root ?? process.cwd();
+    result.reports = {
+      ...(formats.includes('sarif') ? { sarif: toSarif(result, { root }) } : {}),
+      ...(formats.includes('html') ? { html: toHtmlReport(result, { root }) } : {}),
+    };
+  }
+  return result;
 }

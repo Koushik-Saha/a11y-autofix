@@ -28,7 +28,7 @@ import axe from 'axe-core';
 import { JSDOM } from 'jsdom';
 
 import { reactRenderAdapter } from './adapters/react';
-import { runAxeInBrowser, withBrowserSession } from './browser';
+import { runAxeInBrowser, runAxeOnDocumentInBrowser, withBrowserSession } from './browser';
 import type { RenderAdapter, RenderOptions } from './adapters/types';
 import { vueRenderAdapter } from './adapters/vue';
 
@@ -146,8 +146,13 @@ export function resolveComponentFiles(componentPath: string): string[] {
  * so restoring them afterward throws) and cross wires between the two
  * realms' prototypes.
  */
-async function withJsdomEnvironment<T>(fn: () => Promise<T>): Promise<T> {
-  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+async function withJsdomEnvironment<T>(
+  fn: () => Promise<T>,
+  html = '<!doctype html><html><body></body></html>',
+): Promise<T> {
+  // Scripts in `html` are never run: jsdom only executes them with
+  // `runScripts`, which is never set.
+  const dom = new JSDOM(html, {
     url: 'http://localhost/',
     pretendToBeVisual: true,
   });
@@ -327,4 +332,38 @@ export async function detectViolationsInSource(
     violations,
     ...(reviewRules.length > 0 ? { needsReview } : {}),
   };
+}
+
+export interface DetectInHtmlOptions {
+  /** A complete HTML document. */
+  html: string;
+  /** Labels the result; nothing is read from or written to it. */
+  filePath?: string;
+  /** Same as `DetectOptions.browser`: adds color-contrast. */
+  browser?: boolean;
+}
+
+/**
+ * Runs axe-core over a whole HTML document rather than a mounted
+ * component, so page-level rules (document title, `lang`, landmarks,
+ * bypass) apply too. Used to hold a11y-autofix's own HTML report to the
+ * standard it checks others against. In jsdom the document's scripts
+ * never run; in browser mode every network request is blocked.
+ */
+export async function detectViolationsInHtml(
+  options: DetectInHtmlOptions,
+): Promise<AxeViolation[]> {
+  const filePath = options.filePath ?? '(html document)';
+  if (options.browser) {
+    const results = await withBrowserSession(() => runAxeOnDocumentInBrowser(options.html));
+    return results.map((result) => toAxeViolation(result, filePath));
+  }
+  return withJsdomEnvironment(async () => {
+    // As for components: jsdom can't measure contrast; browser mode can.
+    // The <html> element, not `document`: axe-core resolves the document
+    // from an element it's given, but not from a bare global here.
+    const root = (globalThis as unknown as { document: Document }).document.documentElement;
+    const results = await axe.run(root, { rules: { 'color-contrast': { enabled: false } } });
+    return results.violations.map((result) => toAxeViolation(result, filePath));
+  }, options.html);
 }

@@ -71,6 +71,10 @@ from 'a11y-autofix'`) call into it.
   axe-core only for its rule list, to validate `disableRules`. `cli/` is
   the only module that loads config; `scan()` takes the settings as
   plain options.
+- `report/` renders a `ScanResult` as SARIF 2.1.0 or standalone HTML. It
+  is pure: no scanning, no model, no file writes. It uses axe-core only
+  for rule tags (WCAG criteria). `cli/` writes its output; `scan()` can
+  return it via the `reports` option.
 - `src/index.ts` re-exports the four pipeline modules plus `scan` for
   programmatic (non-CLI) use as a library — this is what
   `import { scan } from 'a11y-autofix'` resolves to, wired via
@@ -1198,6 +1202,41 @@ settings }`. `apiKeyEnv` is passed to `generateFix` only when set
       insertion that doesn't compile errors the violation instead of
       falling back, same as a replacement that doesn't compile; no
       real-model run.
+
+- [x] SARIF and HTML reports (2026-10-30): `src/report/` builds both
+      from one list of items (`reportItems`), each with a fix status
+      (`fixed`, `verified-fix`, `unverified-fix`, `not-auto-fixable`,
+      `error`, `suppressed`), so the formats can't disagree. **SARIF:** a
+      rule per axe rule found (help, description, Deque `helpUri`, tags
+      for the WCAG level, each criterion and `best-practice`, parsed from
+      axe's own tags); a result per element; level from impact
+      (critical/serious → error, moderate → warning, minor → note);
+      location relative to `root` under `%SRCROOT%`, with line/column
+      from context/; a SARIF `fix` with the patch's exact char range,
+      only for verified fixes; `suppressions` for config-suppressed
+      results; status and confidence in `properties.a11yAutofix`;
+      `partialFingerprints` from rule, file and element text. **HTML:**
+      inline CSS, no JS, no assets; summary table by severity × status;
+      groups by rule, most severe first; the 30–40% coverage note and the
+      jsdom-means-no-contrast note in the footer; everything escaped.
+      To give suppressed and errored results a location, scan/ now
+      records `location` on errored entries (when context/ found the
+      element) and suppressed ones, and `ScanResult.mode`. CLI: `--format` (text, json, sarif, html), `--output <file>`, and the `report` command (`report <result.json>` with `--format` sarif or html) (renders a saved result; the Action uses it
+      so the SARIF comes from the same scan). `scan()` gains `reports`.
+      detect/ gains `detectViolationsInHtml` (axe-core over a whole
+      document, page-level rules included; Chromium for contrast), used
+      to scan the report itself. Action: `upload-sarif` input runs
+      `report` then `github/codeql-action/upload-sarif@v4` (category
+      `a11y-autofix`). Tests: `test/report.test.ts` (a scratch component
+      producing every status; structural SARIF checks in
+      `test/helpers/sarif-shape.ts`, shown to catch a broken log; golden
+      result; applying the SARIF fix equals `--write`; HTML self-scan
+      with zero violations in jsdom and Chromium, a control document
+      that does fail, hostile-text escaping, self-containment, golden
+      structure; CLI formats and `report`), and
+      `action/action-yml.test.js`. **Limitations:** the SARIF upload
+      itself only runs in a real workflow; the HTML has one light theme;
+      WCAG criteria are numbers, without names.
 
 ### Not started
 

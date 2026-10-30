@@ -12,12 +12,14 @@
  * `program.parse` only runs when this file is executed directly.
  */
 
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { Command } from 'commander';
 
 import { ConfigError, loadProjectConfig, parseProjectConfig, resolveSettings } from '../config';
 import type { LoadedConfig, ProjectConfig, ResolvedSettings } from '../config';
+import { toHtmlReport, toSarif } from '../report';
 import { appendCorrection } from './corrections-log';
 import { createInteractiveHandler } from './interactive';
 import type { InteractiveHandler } from './interactive';
@@ -207,9 +209,16 @@ function printScanResult(result: ScanResult, summary: ScanSummary): void {
   );
 }
 
+export type OutputFormat = 'text' | 'json' | 'sarif' | 'html';
+const OUTPUT_FORMATS: readonly OutputFormat[] = ['text', 'json', 'sarif', 'html'];
+
 export interface CliScanOptions extends ScanOptions {
-  /** Print the full ScanResult as JSON instead of a human-readable diff — for machine consumers (e.g. the GitHub Action). */
+  /** Print the full ScanResult as JSON instead of a human-readable diff — for machine consumers (e.g. the GitHub Action). Same as `format: 'json'`. */
   json?: boolean;
+  /** 'text' (default, the human-readable diff), 'json', 'sarif' (SARIF 2.1.0) or 'html' (a standalone report). */
+  format?: OutputFormat;
+  /** Write the json/sarif/html output to this file instead of stdout. */
+  output?: string;
   /** Review each verified fix before applying it: accept, reject, or edit. Without --write, this is a dry-run review (nothing is ever written, accept or not). */
   interactive?: boolean;
   /**
@@ -266,14 +275,29 @@ export async function runScan(
   targetPath: string,
   options: CliScanOptions = {},
 ): Promise<ScanSummary> {
-  const { json, interactive, logCorrections, projectRoot = process.cwd(), ...flags } = options;
+  const {
+    json: jsonFlag,
+    format: formatOption,
+    output,
+    interactive,
+    logCorrections,
+    projectRoot = process.cwd(),
+    ...flags
+  } = options;
 
-  if (json && interactive) {
-    console.error(
-      '--interactive cannot be combined with --json: interactive prompts would corrupt the JSON written to stdout.',
-    );
+  const fail = (message: string) => {
+    console.error(message);
     process.exitCode = 1;
     return emptySummary();
+  };
+  const formatError = checkFormat(formatOption, jsonFlag, output);
+  if (formatError) return fail(formatError);
+  const format: OutputFormat = jsonFlag ? 'json' : (formatOption ?? 'text');
+  const json = format === 'json';
+  if (interactive && format !== 'text' && !output) {
+    return fail(
+      `--interactive cannot be combined with --${json ? 'json' : `format ${format}`} on stdout: interactive prompts would corrupt the output. Use --output <file>.`,
+    );
   }
 
   // Flags win over the config file (or package.json key), which wins over
@@ -340,12 +364,12 @@ export async function runScan(
   }
 
   const summary = summarize(result);
-  if (json) {
-    const config = { source: loaded.source, path: loaded.path, settings };
-    console.log(JSON.stringify({ ...result, config }, null, 2));
-  } else {
+  if (format === 'text') {
     if (loaded.path) console.log(`Using config from ${displayPath(loaded.path)}`);
     printScanResult(result, summary);
+  } else {
+    const config = { source: loaded.source, path: loaded.path, settings };
+    emit(renderFormat(format, result, projectRoot, { config }), output);
   }
 
   const resolvedCount = scanOptions.write ? summary.verified : 0;
@@ -355,6 +379,86 @@ export async function runScan(
   }
 
   return summary;
+}
+
+/** An error message for an invalid --format / --json / --output combination, or null. */
+function checkFormat(
+  format: string | undefined,
+  json: boolean | undefined,
+  output: string | undefined,
+): string | null {
+  if (format !== undefined && !OUTPUT_FORMATS.includes(format as OutputFormat)) {
+    return `Unknown --format "${format}": use one of ${OUTPUT_FORMATS.join(', ')}.`;
+  }
+  if (json && format !== undefined && format !== 'json') {
+    return `--json cannot be combined with --format ${format}.`;
+  }
+  if (output && !json && (format ?? 'text') === 'text') {
+    return '--output needs a machine format: --format json, sarif or html.';
+  }
+  return null;
+}
+
+/** `extra` (the JSON output's `config`) is added to json output only. */
+function renderFormat(
+  format: Exclude<OutputFormat, 'text'>,
+  result: ScanResult,
+  root: string,
+  extra: Record<string, unknown> = {},
+): string {
+  if (format === 'sarif') return `${JSON.stringify(toSarif(result, { root }), null, 2)}\n`;
+  if (format === 'html') return toHtmlReport(result, { root });
+  return `${JSON.stringify({ ...result, ...extra }, null, 2)}\n`;
+}
+
+/** Writes to `output`, or to stdout as one write so nothing else interleaves. */
+function emit(text: string, output: string | undefined): void {
+  if (output) {
+    writeFileSync(output, text, 'utf8');
+    console.error(`Wrote ${displayPath(path.resolve(output))}`);
+  } else {
+    console.log(text.replace(/\n$/, ''));
+  }
+}
+
+export interface ReportCommandOptions {
+  format?: string;
+  output?: string;
+  /** Paths in the report are relative to this. Defaults to `process.cwd()`. */
+  projectRoot?: string;
+}
+
+/**
+ * `a11y-autofix report <result.json> --format sarif|html`: renders a
+ * result saved with `scan --json` without scanning again, so no model
+ * call is repeated (the GitHub Action makes its SARIF this way). Returns
+ * the exit code.
+ */
+export function runReport(resultPath: string, options: ReportCommandOptions = {}): number {
+  const format = options.format;
+  if (format !== 'sarif' && format !== 'html') {
+    console.error(
+      `report needs --format sarif or --format html${format ? `, not "${format}"` : ''}.`,
+    );
+    return 1;
+  }
+  let result: ScanResult;
+  try {
+    const parsed = JSON.parse(readFileSync(resultPath, 'utf8')) as Partial<ScanResult>;
+    if (typeof parsed.targetPath !== 'string' || !Array.isArray(parsed.violations)) {
+      throw new Error('it is not a result saved with `scan --json`');
+    }
+    result = {
+      ...parsed,
+      suppressed: parsed.suppressed ?? [],
+      ignoredFiles: parsed.ignoredFiles ?? [],
+    } as ScanResult;
+  } catch (error) {
+    console.error(`Could not read scan result "${resultPath}": ${(error as Error).message}`);
+    return 1;
+  }
+  emit(renderFormat(format, result, options.projectRoot ?? process.cwd()), options.output);
+  return 0;
 }
 
 /* c8 ignore start -- exercised via the actual CLI binary, not unit tests */
@@ -383,7 +487,15 @@ function main(): void {
       '--write',
       'apply verified fixes directly to files (unverified fixes are never applied)',
     )
-    .option('--json', 'print the full scan result as JSON instead of a human-readable diff')
+    .option(
+      '--json',
+      'print the full scan result as JSON instead of a human-readable diff (same as --format json)',
+    )
+    .option(
+      '--format <format>',
+      'output format: text (default), json, sarif (SARIF 2.1.0, for GitHub code scanning) or html (a standalone report)',
+    )
+    .option('--output <file>', 'write the json/sarif/html output to this file instead of stdout')
     .option(
       '--browser',
       'render in headless Chromium (via Playwright) instead of jsdom, so color-contrast is checked too — needs `npm i -D playwright && npx playwright install chromium`',
@@ -418,6 +530,18 @@ function main(): void {
     .action(async (targetPath: string, options: CliScanOptions & { disableRule?: string[] }) => {
       const { disableRule, ...rest } = options;
       await runScan(targetPath, { ...rest, ...(disableRule ? { disableRules: disableRule } : {}) });
+    });
+
+  program
+    .command('report')
+    .description(
+      'Render a result saved with `scan --json` as SARIF or HTML, without scanning (or calling the model) again',
+    )
+    .argument('<result>', 'path to a JSON file written by `scan --json`')
+    .requiredOption('--format <format>', 'sarif or html')
+    .option('--output <file>', 'write the report to this file instead of stdout')
+    .action((resultPath: string, options: ReportCommandOptions) => {
+      process.exitCode = runReport(resultPath, options);
     });
 
   program.parse(process.argv);
