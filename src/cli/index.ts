@@ -24,6 +24,7 @@ import type { InteractiveHandler } from './interactive';
 import type { AxeViolation } from '../detect';
 import { BrowserUnavailableError } from '../detect';
 import type { Patch } from '../generate';
+import { openingTagName } from '../generate/patch';
 import type { PatchConfidence, ScanOptions, ScanResult, ScanViolationResult } from '../scan';
 import { scan } from '../scan';
 import type { VerificationResult } from '../verify';
@@ -103,6 +104,22 @@ function printVerificationOutcome(
   }
 }
 
+/**
+ * For an insertion, what was added and where; for a fallback replacement,
+ * why insertion wasn't used. Nothing for an ordinary replacement, whose
+ * output is unchanged.
+ */
+function printPatchKind(patch: Patch, applied: boolean): void {
+  if (patch.kind === 'insert' && patch.insertion) {
+    const tag = openingTagName(patch.insertion.snippet) ?? 'element';
+    console.log(
+      `    kind: insert — ${applied ? 'added' : 'adds'} a new <${tag}> ${patch.insertion.position} the flagged element`,
+    );
+  } else if (patch.fallback) {
+    console.log(`    kind: replace (fallback — ${patch.fallback.reason})`);
+  }
+}
+
 function printViolationResult(entry: ScanViolationResult): void {
   printViolationHeader(entry.violation);
 
@@ -120,6 +137,7 @@ function printViolationResult(entry: ScanViolationResult): void {
     ),
   );
   printVerificationOutcome(entry.verification, entry.applied, entry.patch.confidence);
+  printPatchKind(entry.patch, entry.applied);
 }
 
 function summarize(result: ScanResult): ScanSummary {
@@ -237,6 +255,7 @@ function buildCorrectionsLogger(): NonNullable<ScanOptions['onFixResolved']> {
       startLine: info.startLine,
       violationId: info.violation.id,
       action: info.outcome === 'edited' ? 'edited' : 'rejected',
+      kind: info.suggested.kind ?? 'replace',
       suggested: info.suggested.newSnippet,
       ...(info.editedSnippet ? { edited: info.editedSnippet } : {}),
     });

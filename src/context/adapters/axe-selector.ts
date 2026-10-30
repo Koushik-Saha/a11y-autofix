@@ -32,6 +32,16 @@ export function parseSelector(selector: string): SelectorSegment[] {
 }
 
 /**
+ * The element's tag from axe-core's raw HTML (`<input id="x">` → "input").
+ * For a target selector with no tag in its last segment — axe uses a bare
+ * `#id` for an element whose id is unique — this supplies the tag, and the
+ * id itself then picks the element via `parseHtmlAttributes`.
+ */
+export function tagNameFromHtml(html: string): string | null {
+  return /^<([a-zA-Z][a-zA-Z0-9-]*)/.exec(html)?.[1]?.toLowerCase() ?? null;
+}
+
+/**
  * Extracts static name="value" pairs from a single opening tag, e.g.
  * `<input type="text" name="email">`. Used only as a tie-breaker between
  * multiple candidate elements that already match on tag name/position —

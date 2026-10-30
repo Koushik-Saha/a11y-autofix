@@ -26,13 +26,15 @@ import { parse as parseSfc } from '@vue/compiler-sfc';
 import { Project, SyntaxKind, Node as TsNode } from 'ts-morph';
 
 import type { AxeNodeResult } from '../../detect';
-import { parseHtmlAttributes, parseSelector } from './axe-selector';
+import { parseHtmlAttributes, parseSelector, tagNameFromHtml } from './axe-selector';
 import { SourceResolver } from './resolve';
 import type { ResolvedSourceContext } from './resolve';
 import type {
+  ElementFacts,
   FrameworkAdapter,
   FrameworkElementContext,
   GatherElementContextOptions,
+  IdAttribute,
   JsxElementSnapshot,
   LocateElementsOptions,
   SourceRange,
@@ -100,14 +102,15 @@ function locateElement(root: RootNode, node: AxeNodeResult): WalkEntry {
 
   const segments = parseSelector(targetSelector);
   const leaf = segments[segments.length - 1];
-  if (!leaf?.tagName) {
+  const leafTag = leaf?.tagName ?? tagNameFromHtml(node.html);
+  if (!leaf || !leafTag) {
     throw new Error(`Could not parse a tag name out of selector "${targetSelector}"`);
   }
   const parentSegment = segments.length > 1 ? segments[segments.length - 2] : undefined;
 
   const allEntries = collectElements(root);
 
-  let candidates = allEntries.filter((entry) => entry.node.tag.toLowerCase() === leaf.tagName);
+  let candidates = allEntries.filter((entry) => entry.node.tag.toLowerCase() === leafTag);
 
   if (leaf.nthChild !== null) {
     candidates = candidates.filter((entry) => getSiblingIndex(entry, root) === leaf.nthChild);
@@ -286,6 +289,45 @@ function resolveElement(
   }
 }
 
+function idAttributeOf(element: ElementNode): IdAttribute {
+  for (const prop of element.props) {
+    if (prop.type === NodeTypes.ATTRIBUTE && prop.name === 'id' && prop.value) {
+      return { kind: 'static', value: prop.value.content };
+    }
+    if (
+      prop.type === NodeTypes.DIRECTIVE &&
+      prop.name === 'bind' &&
+      prop.arg?.type === NodeTypes.SIMPLE_EXPRESSION &&
+      prop.arg.isStatic &&
+      prop.arg.content === 'id' &&
+      prop.exp?.type === NodeTypes.SIMPLE_EXPRESSION
+    ) {
+      return { kind: 'dynamic', expression: prop.exp.content };
+    }
+  }
+  return { kind: 'none' };
+}
+
+/** Directives that tie an element to its neighbours or repeat it: a sibling can't safely go next to it. */
+const STRUCTURAL_DIRECTIVES = new Set(['if', 'else-if', 'else', 'for']);
+
+function elementFacts(root: RootNode, element: ElementNode): ElementFacts {
+  const idsInFile = new Set<string>();
+  for (const { node } of collectElements(root)) {
+    if (node === element) continue;
+    const id = idAttributeOf(node);
+    if (id.kind === 'static') idsInFile.add(id.value);
+  }
+  const structural = element.props.some(
+    (prop) => prop.type === NodeTypes.DIRECTIVE && STRUCTURAL_DIRECTIVES.has(prop.name),
+  );
+  return {
+    id: idAttributeOf(element),
+    idsInFile: [...idsInFile].sort(),
+    canInsertSibling: !structural,
+  };
+}
+
 function gatherElementContext(options: GatherElementContextOptions): FrameworkElementContext {
   const { componentPath, violationNode } = options;
 
@@ -303,6 +345,7 @@ function gatherElementContext(options: GatherElementContextOptions): FrameworkEl
     siblings: siblings.map((sibling) => toSnapshot(sibling, componentPath, sourceText)),
     propTypes: extractPropTypes(descriptor.scriptSetup?.content),
     ...(resolved ? { resolved } : {}),
+    facts: elementFacts(root, element),
   };
 }
 

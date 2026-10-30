@@ -58,6 +58,24 @@ export interface GatherElementContextOptions {
   violationNode: AxeNodeResult;
 }
 
+/** The element's `id` attribute: a literal, an expression, or none. */
+export type IdAttribute =
+  { kind: 'static'; value: string } | { kind: 'dynamic'; expression: string } | { kind: 'none' };
+
+/** Facts for fixes that may insert a sibling (see FixContext.labelTarget). */
+export interface ElementFacts {
+  id: IdAttribute;
+  /** Literal id values on other elements in this file, sorted: a new id must not reuse one. */
+  idsInFile: string[];
+  /**
+   * Whether a sibling element can be inserted right next to this one: it
+   * is a direct child of another element (not a component's single root,
+   * not inside an expression like `{cond && <input />}`, not part of a
+   * Vue `v-if`/`v-else` chain).
+   */
+  canInsertSibling: boolean;
+}
+
 /** Everything an adapter can extract by parsing one component's source. */
 export interface FrameworkElementContext {
   sourceCode: string;
@@ -71,6 +89,7 @@ export interface FrameworkElementContext {
    * imports (see resolve.ts). Absent when nothing resolved.
    */
   resolved?: ResolvedSourceContext;
+  facts: ElementFacts;
 }
 
 /**

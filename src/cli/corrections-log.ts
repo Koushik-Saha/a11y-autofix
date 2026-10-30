@@ -15,6 +15,8 @@
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+import type { PatchKind } from '../generate/patch';
+
 export const CORRECTIONS_DIR_NAME = '.a11y-autofix';
 export const CORRECTIONS_LOG_NAME = 'corrections.log';
 
@@ -25,7 +27,12 @@ export interface CorrectionLogEntry {
   startLine: number;
   violationId: string;
   action: 'rejected' | 'edited';
-  /** The AI's original suggestion. */
+  /**
+   * The suggested patch's kind: 'insert' when it added a new element next
+   * to the flagged one. Absent in entries written before kinds existed.
+   */
+  kind?: PatchKind;
+  /** The AI's original suggestion (for an insertion: the new element and the flagged element together). */
   suggested: string;
   /** Only set when `action === 'edited'`: the user's replacement that verified. */
   edited?: string;
