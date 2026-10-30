@@ -18,7 +18,7 @@ import { withBrowserSession } from './detect/browser';
 import { gatherContext, locateElements } from './context';
 import type { FixContext } from './context';
 import { generateFix } from './generate';
-import type { Patch, PreviousAttempt } from './generate';
+import type { GenerationUsage, Patch, PreviousAttempt } from './generate';
 import { StalePatchError, applyPatchToSource, verifyFix } from './verify';
 import type { VerificationResult } from './verify';
 
@@ -73,6 +73,10 @@ export interface ScanOptions {
    * unset, the SDK's own default (`ANTHROPIC_API_KEY`) applies.
    */
   apiKeyEnv?: string;
+  /** See `ResolveFixOptions.onAttempt`. */
+  onAttempt?: NonNullable<ResolveFixOptions['onAttempt']>;
+  /** See `ResolveFixOptions.onUsage`. */
+  onUsage?: NonNullable<ResolveFixOptions['onUsage']>;
 }
 
 export interface VerifiedFixPromptContext {
@@ -181,6 +185,22 @@ export interface ResolveFixOptions {
   browser?: boolean;
   /** See `ScanOptions.apiKeyEnv`. */
   apiKeyEnv?: string;
+  /**
+   * Called after each generate+verify attempt (up to two per violation),
+   * including a first attempt that was rejected and then retried —
+   * which the final result alone doesn't show. Purely observational.
+   */
+  onAttempt?: (attempt: AttemptInfo) => void;
+  /** Called with the token usage of every model call. Purely observational. */
+  onUsage?: (usage: GenerationUsage, context: FixContext) => void;
+}
+
+export interface AttemptInfo {
+  context: FixContext;
+  /** 1 for the first attempt, 2 for the retry. */
+  attempt: 1 | 2;
+  patch: Patch;
+  verification: VerificationResult;
 }
 
 async function attemptFix(
@@ -193,12 +213,14 @@ async function attemptFix(
     context,
     ...(previousAttempt ? { previousAttempt } : {}),
     ...(options.apiKeyEnv ? { apiKeyEnv: options.apiKeyEnv } : {}),
+    ...(options.onUsage ? { onUsage: options.onUsage } : {}),
   });
   const verification = await verifyFix({
     patch,
     originalViolation: violation,
     browser: Boolean(options.browser),
   });
+  options.onAttempt?.({ context, attempt: previousAttempt ? 2 : 1, patch, verification });
   return { patch, verification };
 }
 

@@ -321,6 +321,35 @@ If you run with `--write`, this is also the only thing that decides what touches
 
 See [`PLAN.md`](./PLAN.md) for the full module-by-module design notes, including known limitations (e.g. `color-contrast` can't be detected in the default jsdom mode — jsdom has no real paint implementation for axe-core to measure against — only with `--browser`) and open decisions.
 
+## Real-model eval
+
+The test suite mocks the model, so it proves the pipeline works but not that the model's fixes are any good. `npm run eval:real` runs the real pipeline (detect -> context -> generate -> verify, with the same single retry `scan` uses) against every component fixture in `test/fixtures/`, calling the Claude API for real. It needs `ANTHROPIC_API_KEY`; without one it exits 1 and calls nothing. It is never part of `npm test` or CI.
+
+```sh
+ANTHROPIC_API_KEY=… npm run eval:real                       # every fixture, jsdom
+ANTHROPIC_API_KEY=… npm run eval:real -- --browser          # Chromium, adds color-contrast
+ANTHROPIC_API_KEY=… npm run eval:real -- --only Vue         # fixtures whose path contains "Vue"
+ANTHROPIC_API_KEY=… npm run eval:real -- --update-baseline  # also write evals/baseline.md
+npm run eval:compare [report] [--baseline path]             # newest evals/report-*.md vs evals/baseline.md
+```
+
+Each run writes `evals/report-<date>.md` (gitignored; only `evals/baseline.md` is committed). The report contains:
+
+- for each fixture: the violations found, the fix proposed (the exact `newSnippet`), whether it verified, and if not, why (rules still flagged, rules introduced, or the error);
+- acceptance per violation type: verified, verified first try, unverified and errored counts;
+- every rejected attempt quoted in full next to the original element, including first attempts that a retry then fixed;
+- tokens (input, output, thinking, cache) and estimated cost per fixture and in total, plus the average cost per violation and per 100 violations. Prices are in `scripts/eval/pricing.ts`. A model without a listed price shows "unknown" rather than a guess.
+
+The full run data is embedded at the end of the report, so `eval:compare` reads what the run recorded rather than re-parsing prose. `eval:compare` is the gate for prompt and model changes:
+
+- **Exit 1** when any violation the baseline verified (identified by fixture, rule and occurrence) is now unverified, errored or missing. This is per violation, so a type that drops from 3/3 to 2/3 fails.
+- **Exit 2** when it can't compare: no report yet, an empty baseline, a different `--browser` mode, or a damaged data section. A gate that couldn't run is never reported as a pass.
+- **Exit 0** otherwise. Improvements and new cases are listed but not gated. Fixtures skipped with `--only` are not gated either.
+
+Model output varies between runs, so a single flaky regression is possible. Re-run before concluding that a prompt change broke something.
+
+The committed `evals/baseline.md` is currently an empty marker. The harness was added without an API key available, so no real results exist yet, and none were made up.
+
 ## Contributing
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for setup, the development loop, and what to check before opening a PR.
