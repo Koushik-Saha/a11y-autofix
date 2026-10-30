@@ -98,7 +98,7 @@ interface SharedBrowser {
 
 let shared: SharedBrowser | null = null;
 
-async function withBrowser<T>(fn: (browser: Browser) => Promise<T>): Promise<T> {
+export async function withBrowser<T>(fn: (browser: Browser) => Promise<T>): Promise<T> {
   if (!shared) {
     shared = { browser: launchChromium(), users: 0 };
     // Rejections are surfaced to every awaiting caller below; this only

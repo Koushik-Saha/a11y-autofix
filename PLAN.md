@@ -71,6 +71,10 @@ from 'a11y-autofix'`) call into it.
   axe-core only for its rule list, to validate `disableRules`. `cli/` is
   the only module that loads config; `scan()` takes the settings as
   plain options.
+- `page/` is whole-page scanning (`scanUrl`): its own SSRF guard
+  (`guard.ts`) and egress proxy (`proxy.ts`), Chromium via detect/'s
+  shared launcher, and report/'s WCAG tag parsing. It never touches
+  context/, generate/ or verify/: page mode doesn't fix.
 - `report/` renders a `ScanResult` as SARIF 2.1.0 or standalone HTML. It
   is pure: no scanning, no model, no file writes. It uses axe-core only
   for rule tags (WCAG criteria). `cli/` writes its output; `scan()` can
@@ -1237,6 +1241,44 @@ settings }`. `apiKeyEnv` is passed to `generateFix` only when set
       `action/action-yml.test.js`. **Limitations:** the SARIF upload
       itself only runs in a real workflow; the HTML has one light theme;
       WCAG criteria are numbers, without names.
+
+- [x] Whole-page scanning, `scan-url` (2026-10-30): `src/page/`.
+      `scanUrl(url, options)` and `a11y-autofix scan-url <url>`
+      (`--json`, `--scroll`, `--timeout`, `--settle`, `--allow-host`).
+      Loads the page in Chromium (`waitUntil: load`, then network idle,
+      then a settle delay; optional scroll), injects axe-core (CSP
+      bypassed for that) and runs tags wcag2a/2aa/21a/21aa/22aa plus
+      best-practice over the whole document, frames excluded. Results are
+      grouped one per rule, with `elementCount` and each element's
+      selector, HTML and failure summary; WCAG criteria come from
+      report/'s tag parsing. Reports only: `fixesGenerated: false` and a
+      note in the output. Exits 1 on any violation. **SSRF:** http(s)
+      only; the URL's host is checked before any browser starts; then
+      every request goes through a local egress proxy (context-level
+      Playwright proxy with `<-loopback>`, otherwise Chromium skips the
+      proxy for loopback). The proxy checks each destination (IP
+      literals, `localhost`/`*.localhost`, and every address a hostname
+      resolves to) against a BlockList of private, loopback,
+      link-local, CGNAT, multicast, reserved and documentation ranges,
+      IPv4 embedded in IPv6 included, and connects to the checked
+      address (no DNS rebinding). Plain-HTTP WebSocket upgrades are
+      refused; service workers are blocked. Request interception alone
+      was tried first and rejected: Playwright never routes redirect
+      targets, so a redirect to a private address got through (verified
+      in a probe). `--allow-host host[:port]` is the only way to reach
+      a private host. Tests: `test/scan-url.test.ts` (address and URL
+      refusals including `0x7f000001` and DNS-resolved private hosts;
+      the proxy's CONNECT refusal, allowlisted tunnel and WebSocket
+      refusal; then against local servers: the fixture page
+      `test/fixtures/pages/broken-page.html` reports html-has-lang,
+      document-title, heading-order and grouped color-contrast; its
+      stylesheet on a second local server is blocked and never reached;
+      a redirect to it is refused; settle delay and `--scroll` catch late
+      and lazy content; timeout; CLI output). **Limitations:** no iframes;
+      no interaction beyond scrolling; no SARIF/HTML output for page
+      mode yet; config (`disableRules`, `severity`) isn't applied; the
+      HTTPS path through the proxy is tested at the tunnel level, not
+      against a real TLS site.
 
 ### Not started
 
