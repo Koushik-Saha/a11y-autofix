@@ -56,6 +56,31 @@ Pass `--json` to get the full scan result as machine-readable JSON on stdout ins
 npx a11y-autofix scan src/components --json > result.json
 ```
 
+### Reports: SARIF and HTML
+
+```sh
+npx a11y-autofix scan src/components --format sarif --output a11y.sarif   # SARIF 2.1.0
+npx a11y-autofix scan src/components --format html --output a11y.html     # standalone HTML report
+npx a11y-autofix report result.json --format html                         # re-render a saved --json result
+```
+
+`--format` takes `text` (the default diff output), `json` (same as `--json`), `sarif` or `html`. Without `--output`, the report goes to stdout. `report` re-renders a result saved with `scan --json` without scanning again, so no model call is repeated. Both formats cover every violation with its fix status, including suppressed ones.
+
+**SARIF** (for GitHub code scanning and other SARIF viewers):
+
+| SARIF                    | From                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tool.driver.rules[]`    | One per axe-core rule found: `id` (the axe rule id), `shortDescription` (axe's help), `fullDescription`, `helpUri` (the Deque University page), and `properties.tags`: `accessibility`, the WCAG level (`WCAG 2.1 AA`), each success criterion (`WCAG 1.4.3`), and `best-practice` for non-WCAG rules. The raw axe tags are in `properties.axeTags`. |
+| `results[]`              | One per offending element, the same unit as the CLI's counts.                                                                                                                                                                                                                                                                                        |
+| `level`                  | `critical` and `serious` → `error`, `moderate` → `warning`, `minor` → `note`, no impact → `warning`.                                                                                                                                                                                                                                                 |
+| `locations[0]`           | The file relative to the repository root (`uriBaseId: %SRCROOT%`), with the element's start and end line and column (1-based, UTF-16 columns) and its source as `snippet`.                                                                                                                                                                           |
+| `fixes[]`                | Only for a verified fix: the exact replacement (`charOffset`/`charLength` from the patch's position and `insertedContent`), the same edit `--write` makes. Unverified fixes are never offered as SARIF fixes.                                                                                                                                        |
+| `suppressions[]`         | For violations suppressed by the project config: `kind: external`, with the reason.                                                                                                                                                                                                                                                                  |
+| `properties.a11yAutofix` | `status` (`verified-fix`, `fixed`, `unverified-fix`, `not-auto-fixable`, `error`, `suppressed`), `verifiedFixAvailable`, `applied`, `impact`, `confidence`, `patchKind` and `detail`. Run-level totals, ignored files and the render mode are in `runs[0].properties.a11yAutofix`.                                                                   |
+| `partialFingerprints`    | A hash of the rule, file and element source, so an alert follows its element when lines above it move.                                                                                                                                                                                                                                               |
+
+**HTML** is one self-contained file: inline CSS, no JavaScript, and no external assets. The only URLs are links to the rule docs. It has totals by severity and fix status, then the violations grouped by rule with their WCAG criteria, the element, and the fix or the reason there isn't one. The footer says what automated testing can't cover: about 30–40% of WCAG issues are detectable this way. The report is held to the standard the tool applies: the test suite runs axe-core over the whole generated page, in jsdom and in Chromium (which checks contrast), and requires zero violations.
+
 ### Project configuration
 
 Commit an `a11y-autofix.config.json` to the directory you run `a11y-autofix` from (normally the project root) to set defaults for everyone on the project. A full example:
@@ -225,6 +250,8 @@ for (const entry of result.violations) {
 | `'unverified'` | `context`, `patch`, `verification`, `applied` (always `false`) | A fix was generated but axe-core still flags something after applying it — see `verification.remainingViolations` / `newViolations`. Never written to disk.                                                                              |
 | `'errored'`    | `error`, `reason?`                                             | context/generate/verify threw for this violation (e.g. an unfixable JSX node, a Claude API error) — the rest of the scan continues. `reason: 'not-auto-fixable'` marks a deliberate refusal (e.g. low contrast over a background image). |
 
+Pass `reports: ['sarif', 'html']` to get `result.reports.sarif` (an object) and `result.reports.html` (a string), with paths relative to `root`. `toSarif(result, { root })` and `toHtmlReport(result, { root })` render any result, including one loaded from `--json` output.
+
 `scan()` doesn't read the [project config](#project-configuration) itself; pass the same settings as options: `ignore` (with `root`, the directory the globs are relative to, by default `process.cwd()`), `disableRules`, `severity` and `apiKeyEnv`. Suppressed violations come back in `result.suppressed`, separate from `result.violations`, and skipped files in `result.ignoredFiles`. `loadProjectConfig(dir)` and `resolveSettings(config, overrides)` are exported if you want the CLI's loading and precedence rules.
 
 `scan()` throws only if `targetPath` doesn't exist, or (with `{ browser: true }`) if Playwright/Chromium can't be launched — a `BrowserUnavailableError`, never a silent fallback to jsdom. Per-violation failures never abort the scan.
@@ -268,13 +295,14 @@ jobs:
 
 ### Inputs
 
-| Input                | Default               | Description                                                                                                                                                           |
-| -------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`               | `.`                   | Path to scan, relative to the repo root.                                                                                                                              |
-| `anthropic-api-key`  | _(required)_          | Passed through as `ANTHROPIC_API_KEY`.                                                                                                                                |
-| `github-token`       | `${{ github.token }}` | Needs `pull-requests: write` to post the review and summary comment.                                                                                                  |
-| `review-event`       | `COMMENT`             | `COMMENT` or `REQUEST_CHANGES` for the review carrying the inline suggestions. Never `APPROVE` — this Action proposes fixes, it doesn't vouch for the rest of the PR. |
-| `fail-on-unresolved` | `false`               | Fail the job if any violation is unverified or errored. A verified fix waiting to be accepted as a suggestion does **not** count as unresolved.                       |
+| Input                | Default               | Description                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`               | `.`                   | Path to scan, relative to the repo root.                                                                                                                                                                                                                                                                                                                      |
+| `anthropic-api-key`  | _(required)_          | Passed through as `ANTHROPIC_API_KEY`.                                                                                                                                                                                                                                                                                                                        |
+| `github-token`       | `${{ github.token }}` | Needs `pull-requests: write` to post the review and summary comment.                                                                                                                                                                                                                                                                                          |
+| `review-event`       | `COMMENT`             | `COMMENT` or `REQUEST_CHANGES` for the review carrying the inline suggestions. Never `APPROVE` — this Action proposes fixes, it doesn't vouch for the rest of the PR.                                                                                                                                                                                         |
+| `fail-on-unresolved` | `false`               | Fail the job if any violation is unverified or errored. A verified fix waiting to be accepted as a suggestion does **not** count as unresolved.                                                                                                                                                                                                               |
+| `upload-sarif`       | `false`               | Also upload the results as [SARIF](#reports-sarif-and-html) with `github/codeql-action/upload-sarif`, so they appear in the Security tab and as PR annotations. The SARIF is made from the same scan, with no second model run. Needs `security-events: write` in `permissions`. Uploads from fork PRs fail, because their token can't write security events. |
 
 The Action runs from the repository root, so a committed [project config](#project-configuration) applies there too: ignored files are skipped, and suppressed violations are counted in the summary comment. The exception is `apiKeyEnv`: the Action always uses its own `anthropic-api-key` input.
 
