@@ -8,3 +8,4 @@ export * from './context';
 export * from './generate';
 export * from './verify';
 export * from './scan';
+export * from './config';

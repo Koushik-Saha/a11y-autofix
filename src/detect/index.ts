@@ -64,6 +64,8 @@ export interface DetectOptions {
    * jsdom.
    */
   browser?: boolean;
+  /** Files (absolute paths) for which this returns true are skipped: not rendered, not listed in `files`. */
+  exclude?: (absolutePath: string) => boolean;
 }
 
 export interface DetectedFile {
@@ -249,7 +251,9 @@ async function renderAndDetectViolations(
  * describes text other than `files[i].source`.
  */
 export async function detectViolations(options: DetectOptions): Promise<DetectResult> {
-  const filePaths = resolveComponentFiles(options.componentPath).map((file) => path.resolve(file));
+  const filePaths = resolveComponentFiles(options.componentPath)
+    .map((file) => path.resolve(file))
+    .filter((file) => !options.exclude?.(file));
   const browser = Boolean(options.browser);
   const files: DetectedFile[] = [];
   const violations: AxeViolation[] = [];

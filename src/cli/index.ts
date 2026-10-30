@@ -16,6 +16,8 @@ import path from 'node:path';
 
 import { Command } from 'commander';
 
+import { ConfigError, loadProjectConfig, parseProjectConfig, resolveSettings } from '../config';
+import type { LoadedConfig, ProjectConfig, ResolvedSettings } from '../config';
 import { appendCorrection } from './corrections-log';
 import { createInteractiveHandler } from './interactive';
 import type { InteractiveHandler } from './interactive';
@@ -36,6 +38,22 @@ export interface ScanSummary {
   verified: number;
   unverified: number;
   errored: number;
+  /** Detected but hidden by config (`disableRules`/`severity`); not in `violationsFound`. */
+  suppressed: number;
+  /** Component files skipped by config `ignore`; not in `filesScanned`. */
+  filesIgnored: number;
+}
+
+function emptySummary(): ScanSummary {
+  return {
+    filesScanned: 0,
+    violationsFound: 0,
+    verified: 0,
+    unverified: 0,
+    errored: 0,
+    suppressed: 0,
+    filesIgnored: 0,
+  };
 }
 
 function displayPath(absolutePath: string): string {
@@ -106,11 +124,11 @@ function printViolationResult(entry: ScanViolationResult): void {
 
 function summarize(result: ScanResult): ScanSummary {
   const summary: ScanSummary = {
+    ...emptySummary(),
     filesScanned: result.filesScanned,
     violationsFound: result.violations.length,
-    verified: 0,
-    unverified: 0,
-    errored: 0,
+    suppressed: result.suppressed.length,
+    filesIgnored: result.ignoredFiles.length,
   };
 
   for (const entry of result.violations) {
@@ -122,9 +140,35 @@ function summarize(result: ScanResult): ScanSummary {
   return summary;
 }
 
+/**
+ * " 3 suppressed by config (region ×2, heading-order ×1). 1 file(s) skipped
+ * by config ignore." — empty when config hid nothing. Suppressed
+ * violations are always counted, never silently dropped.
+ */
+function describeConfigEffects(result: ScanResult): string {
+  const parts: string[] = [];
+  if (result.suppressed.length > 0) {
+    const byRule = new Map<string, number>();
+    for (const entry of result.suppressed) {
+      byRule.set(entry.violation.id, (byRule.get(entry.violation.id) ?? 0) + 1);
+    }
+    const rules = [...byRule].map(([id, count]) => `${id} ×${count}`).join(', ');
+    parts.push(`${result.suppressed.length} suppressed by config (${rules}).`);
+  }
+  if (result.ignoredFiles.length > 0) {
+    parts.push(`${result.ignoredFiles.length} file(s) skipped by config ignore.`);
+  }
+  return parts.map((part) => ` ${part}`).join('');
+}
+
 function printScanResult(result: ScanResult, summary: ScanSummary): void {
+  const configEffects = describeConfigEffects(result);
   if (result.violations.length === 0) {
-    console.log(`No accessibility violations found in ${displayPath(result.targetPath)}.`);
+    console.log(
+      configEffects
+        ? `No accessibility violations to fix in ${displayPath(result.targetPath)}.${configEffects}`
+        : `No accessibility violations found in ${displayPath(result.targetPath)}.`,
+    );
     return;
   }
 
@@ -140,7 +184,8 @@ function printScanResult(result: ScanResult, summary: ScanSummary): void {
 
   console.log(
     `\n${summary.violationsFound} violation(s) found across ${summary.filesScanned} file(s): ` +
-      `${summary.verified} verified, ${summary.unverified} unverified, ${summary.errored} errored.`,
+      `${summary.verified} verified, ${summary.unverified} unverified, ${summary.errored} errored.` +
+      configEffects,
   );
 }
 
@@ -157,6 +202,30 @@ export interface CliScanOptions extends ScanOptions {
    * outside it).
    */
   logCorrections?: boolean;
+  /**
+   * Where to look for `a11y-autofix.config.json` / package.json, and what
+   * `ignore` globs are relative to. Defaults to `process.cwd()`.
+   */
+  projectRoot?: string;
+}
+
+/**
+ * The config-backed settings given as command-line flags (or by a direct
+ * `runScan` caller), validated like the config itself. Unset keys are left
+ * out so `resolveSettings` falls through to the config.
+ */
+function flagSettings(options: CliScanOptions): ProjectConfig {
+  const flags: Record<string, unknown> = {
+    apiKeyEnv: options.apiKeyEnv,
+    ignore: options.ignore,
+    disableRules: options.disableRules,
+    severity: options.severity,
+    browser: options.browser,
+  };
+  for (const key of Object.keys(flags)) {
+    if (flags[key] === undefined) delete flags[key];
+  }
+  return parseProjectConfig(flags, 'command-line options');
 }
 
 function buildCorrectionsLogger(): NonNullable<ScanOptions['onFixResolved']> {
@@ -178,15 +247,44 @@ export async function runScan(
   targetPath: string,
   options: CliScanOptions = {},
 ): Promise<ScanSummary> {
-  const { json, interactive, logCorrections, ...scanOptions } = options;
+  const { json, interactive, logCorrections, projectRoot = process.cwd(), ...flags } = options;
 
   if (json && interactive) {
     console.error(
       '--interactive cannot be combined with --json: interactive prompts would corrupt the JSON written to stdout.',
     );
     process.exitCode = 1;
-    return { filesScanned: 0, violationsFound: 0, verified: 0, unverified: 0, errored: 0 };
+    return emptySummary();
   }
+
+  // Flags win over the config file (or package.json key), which wins over
+  // the defaults.
+  let loaded: LoadedConfig;
+  let settings: ResolvedSettings;
+  let flagConfig: ProjectConfig;
+  try {
+    loaded = loadProjectConfig(projectRoot);
+    flagConfig = flagSettings(flags);
+    settings = resolveSettings(loaded.config, flagConfig);
+  } catch (error) {
+    if (!(error instanceof ConfigError)) throw error;
+    console.error(json ? JSON.stringify({ error: error.message }) : error.message);
+    process.exitCode = 1;
+    return emptySummary();
+  }
+
+  const scanOptions: ScanOptions = {
+    ...flags,
+    browser: settings.browser,
+    ignore: settings.ignore,
+    root: projectRoot,
+    disableRules: settings.disableRules,
+    severity: settings.severity,
+  };
+  // Only when set explicitly: otherwise the SDK's own default lookup applies, as before config existed.
+  const explicitApiKeyEnv = flagConfig.apiKeyEnv ?? loaded.config.apiKeyEnv;
+  if (explicitApiKeyEnv) scanOptions.apiKeyEnv = explicitApiKeyEnv;
+  else delete scanOptions.apiKeyEnv;
 
   if (logCorrections && !interactive) {
     console.error(
@@ -216,7 +314,7 @@ export async function runScan(
         console.error(`Could not read path "${targetPath}": ${(error as Error).message}`);
       }
       process.exitCode = 1;
-      return { filesScanned: 0, violationsFound: 0, verified: 0, unverified: 0, errored: 0 };
+      return emptySummary();
     }
   } finally {
     interactiveHandler?.close();
@@ -224,8 +322,10 @@ export async function runScan(
 
   const summary = summarize(result);
   if (json) {
-    console.log(JSON.stringify(result, null, 2));
+    const config = { source: loaded.source, path: loaded.path, settings };
+    console.log(JSON.stringify({ ...result, config }, null, 2));
   } else {
+    if (loaded.path) console.log(`Using config from ${displayPath(loaded.path)}`);
     printScanResult(result, summary);
   }
 
@@ -239,6 +339,11 @@ export async function runScan(
 }
 
 /* c8 ignore start -- exercised via the actual CLI binary, not unit tests */
+/** Commander collector for a repeatable option: `--ignore a --ignore b` gives `['a', 'b']`. */
+function collect(value: string, previous: string[] | undefined): string[] {
+  return [...(previous ?? []), value];
+}
+
 function main(): void {
   const program = new Command();
 
@@ -264,6 +369,25 @@ function main(): void {
       '--browser',
       'render in headless Chromium (via Playwright) instead of jsdom, so color-contrast is checked too — needs `npm i -D playwright && npx playwright install chromium`',
     )
+    .option('--no-browser', 'render in jsdom even if the project config sets "browser": true')
+    .option(
+      '--ignore <glob>',
+      'skip component files matching this glob, relative to the current directory (repeatable; replaces the config\'s "ignore")',
+      collect,
+    )
+    .option(
+      '--disable-rule <id>',
+      'never report this axe-core rule; its violations are counted as suppressed (repeatable; replaces the config\'s "disableRules")',
+      collect,
+    )
+    .option(
+      '--severity <level>',
+      'minimum impact to report: critical, serious, moderate, or minor (default); lower ones are counted as suppressed',
+    )
+    .option(
+      '--api-key-env <name>',
+      'environment variable holding the Anthropic API key (default: ANTHROPIC_API_KEY)',
+    )
     .option(
       '--interactive',
       'review each verified fix before applying it: accept, reject, or edit (without --write, this only reviews — nothing is ever written)',
@@ -272,8 +396,9 @@ function main(): void {
       '--log-corrections',
       'with --interactive, save rejected/edited fixes to .a11y-autofix/corrections.log for your own reference — fully local, opt-in, never sent anywhere',
     )
-    .action(async (targetPath: string, options: CliScanOptions) => {
-      await runScan(targetPath, options);
+    .action(async (targetPath: string, options: CliScanOptions & { disableRule?: string[] }) => {
+      const { disableRule, ...rest } = options;
+      await runScan(targetPath, { ...rest, ...(disableRule ? { disableRules: disableRule } : {}) });
     });
 
   program.parse(process.argv);

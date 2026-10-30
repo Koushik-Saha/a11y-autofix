@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The Anthropic client is mocked, so these tests see exactly the request
 // generate/ sends and can stand in for the model's reply. Everything else
@@ -152,5 +152,43 @@ describe('landmark-unique: fixing only the flagged landmark', () => {
     expect(patched.match(/<nav aria-label="Help">/g)).toHaveLength(1);
     expect(patched.match(/<nav>/g)).toHaveLength(1);
     expect(source.match(/<nav>/g)).toHaveLength(2);
+  });
+});
+
+describe('apiKeyEnv', () => {
+  async function linkContext() {
+    const componentPath = fixture('MissingLinkName.tsx');
+    const { violations } = await detectViolations({ componentPath });
+    return gatherContext({ violation: violations[0]!, componentPath });
+  }
+
+  afterEach(() => {
+    delete process.env.TEAM_ANTHROPIC_KEY;
+  });
+
+  it('reads the key from the named variable', async () => {
+    process.env.TEAM_ANTHROPIC_KEY = 'sk-team';
+    modelReplies('<a href="/articles/wcag-2026-update">Read more</a>');
+
+    await generateFix({ context: await linkContext(), apiKeyEnv: 'TEAM_ANTHROPIC_KEY' });
+
+    expect(AnthropicMock).toHaveBeenCalledWith({ apiKey: 'sk-team' });
+  });
+
+  it('fails clearly, without falling back to ANTHROPIC_API_KEY, when the variable is unset', async () => {
+    await expect(
+      generateFix({ context: await linkContext(), apiKeyEnv: 'TEAM_ANTHROPIC_KEY' }),
+    ).rejects.toThrow(
+      'No Anthropic API key: the environment variable TEAM_ANTHROPIC_KEY (set by apiKeyEnv) is not set.',
+    );
+    expect(AnthropicMock).not.toHaveBeenCalled();
+  });
+
+  it('without apiKeyEnv, leaves key lookup to the SDK as before', async () => {
+    modelReplies('<a href="/articles/wcag-2026-update">Read more</a>');
+
+    await generateFix({ context: await linkContext() });
+
+    expect(AnthropicMock).toHaveBeenCalledWith();
   });
 });

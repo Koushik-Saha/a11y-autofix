@@ -56,6 +56,59 @@ Pass `--json` to get the full scan result as machine-readable JSON on stdout ins
 npx a11y-autofix scan src/components --json > result.json
 ```
 
+### Project configuration
+
+Commit an `a11y-autofix.config.json` to the directory you run `a11y-autofix` from (normally the project root) to set defaults for everyone on the project. A full example:
+
+```json
+{
+  "apiKeyEnv": "TEAM_ANTHROPIC_KEY",
+  "ignore": ["src/legacy/**", "**/*.stories.tsx"],
+  "disableRules": ["region", "landmark-one-main"],
+  "severity": "serious",
+  "browser": true
+}
+```
+
+| Setting        | Default               | What it does                                                                                                                                                                                                                                             |
+| -------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apiKeyEnv`    | `"ANTHROPIC_API_KEY"` | Name of the environment variable that holds the Anthropic API key. The key itself never goes in config, and an `apiKey` setting is rejected. If the named variable isn't set, fixes fail with a clear error; it never falls back to `ANTHROPIC_API_KEY`. |
+| `ignore`       | `[]`                  | Glob patterns for component files to skip, matched against paths relative to the project root (`/` separators on every OS). Skipped files are never rendered.                                                                                            |
+| `disableRules` | `[]`                  | axe-core rule ids never to report. Must be real rule ids; a typo is an error, not a silent no-op.                                                                                                                                                        |
+| `severity`     | `"minor"`             | Minimum impact to report: `critical`, `serious`, `moderate` or `minor`. Violations axe-core gives no impact are always reported.                                                                                                                         |
+| `browser`      | `false`               | Default for [`--browser`](#color-contrast---browser).                                                                                                                                                                                                    |
+
+Instead of a separate file, the same object can go under an `"a11y-autofix"` key in `package.json`. If both exist, the config file wins, and the two are never merged.
+
+**Precedence:** a command-line flag beats the config, and the config beats the default. Each setting has a flag: `--api-key-env <name>`, `--ignore <glob>` and `--disable-rule <id>` (both repeatable), `--severity <level>`, and `--browser` / `--no-browser`. A flag replaces the config's value outright: `--ignore` on the command line replaces the config's `ignore` list rather than adding to it.
+
+**Invalid config stops the run** before anything is scanned, with every problem listed, for example:
+
+```
+Invalid a11y-autofix.config.json:
+  - disableRules[1]: unknown axe-core rule id "image_alt"
+  - severity: Invalid option: expected one of "minor"|"moderate"|"serious"|"critical"
+  - disabledRule: unknown setting
+```
+
+**Suppressed is not the same as fixed.** A violation hidden by `disableRules` or `severity` is still detected. It is never sent to the model or fixed, and it is always counted. The summary line reports it separately from verified fixes, and so does the Action's PR comment. Suppressed violations don't make the exit code non-zero:
+
+```
+1 violation(s) found across 2 file(s): 1 verified, 0 unverified, 0 errored. 3 suppressed by config (region ×2, landmark-one-main ×1). 1 file(s) skipped by config ignore.
+```
+
+With `--json`, each suppressed violation is listed in `suppressed` (with `reason: "disabled-rule"` or `"below-severity"`), skipped files are listed in `ignoredFiles`, and a `config` object records where the settings came from and what they resolved to:
+
+```json
+"config": {
+  "source": "file",
+  "path": "/repo/a11y-autofix.config.json",
+  "settings": { "apiKeyEnv": "TEAM_ANTHROPIC_KEY", "ignore": ["src/legacy/**", "**/*.stories.tsx"], "disableRules": ["region", "landmark-one-main"], "severity": "serious", "browser": true }
+}
+```
+
+`source` is `"file"`, `"package"` (the `package.json` key) or `"none"`.
+
 ### Color contrast (`--browser`)
 
 By default, components are rendered in [jsdom](https://github.com/jsdom/jsdom): fast, with no browser to download. But jsdom has no layout or paint, so axe-core can't measure contrast there, and **the default mode cannot detect `color-contrast` violations** (low-contrast text, the most common accessibility failure on the web). `--browser` renders each component in headless Chromium via [Playwright](https://playwright.dev) instead and runs axe-core's full default ruleset, `color-contrast` included:
@@ -172,6 +225,8 @@ for (const entry of result.violations) {
 | `'unverified'` | `context`, `patch`, `verification`, `applied` (always `false`) | A fix was generated but axe-core still flags something after applying it — see `verification.remainingViolations` / `newViolations`. Never written to disk.                                                                              |
 | `'errored'`    | `error`, `reason?`                                             | context/generate/verify threw for this violation (e.g. an unfixable JSX node, a Claude API error) — the rest of the scan continues. `reason: 'not-auto-fixable'` marks a deliberate refusal (e.g. low contrast over a background image). |
 
+`scan()` doesn't read the [project config](#project-configuration) itself; pass the same settings as options: `ignore` (with `root`, the directory the globs are relative to, by default `process.cwd()`), `disableRules`, `severity` and `apiKeyEnv`. Suppressed violations come back in `result.suppressed`, separate from `result.violations`, and skipped files in `result.ignoredFiles`. `loadProjectConfig(dir)` and `resolveSettings(config, overrides)` are exported if you want the CLI's loading and precedence rules.
+
 `scan()` throws only if `targetPath` doesn't exist, or (with `{ browser: true }`) if Playwright/Chromium can't be launched — a `BrowserUnavailableError`, never a silent fallback to jsdom. Per-violation failures never abort the scan.
 
 Pass `{ browser: true }` to detect and verify in headless Chromium, which adds `color-contrast` checks — see [Color contrast](#color-contrast---browser). `detectViolations` and `verifyFix` take the same `browser` option.
@@ -218,6 +273,8 @@ jobs:
 | `github-token`       | `${{ github.token }}` | Needs `pull-requests: write` to post the review and summary comment.                                                                                                  |
 | `review-event`       | `COMMENT`             | `COMMENT` or `REQUEST_CHANGES` for the review carrying the inline suggestions. Never `APPROVE` — this Action proposes fixes, it doesn't vouch for the rest of the PR. |
 | `fail-on-unresolved` | `false`               | Fail the job if any violation is unverified or errored. A verified fix waiting to be accepted as a suggestion does **not** count as unresolved.                       |
+
+The Action runs from the repository root, so a committed [project config](#project-configuration) applies there too: ignored files are skipped, and suppressed violations are counted in the summary comment. The exception is `apiKeyEnv`: the Action always uses its own `anthropic-api-key` input.
 
 **A note on `pull_request_target`:** the Action also runs on `pull_request_target` events (needed if your workflow scans fork PRs with write access), but that event runs with your base branch's secrets and permissions by default — the usual fork-PR security caveats apply to your workflow, not to anything this Action does differently. If you're not sure you need it, use `pull_request`.
 

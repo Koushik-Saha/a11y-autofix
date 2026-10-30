@@ -152,7 +152,7 @@ async function main() {
     }
   }
 
-  let summaryBody = renderSummaryCommentBody(inline, summary);
+  let summaryBody = renderSummaryCommentBody(inline, summary, scanResult.suppressed);
   if (reviewPostFailure) {
     summaryBody += `\n\n---\n⚠️ Posting ${inline.length} inline suggestion(s) failed: ${reviewPostFailure}`;
   }

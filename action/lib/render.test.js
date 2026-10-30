@@ -45,6 +45,27 @@ describe('renderSummaryCommentBody', () => {
     expect(body).toContain('No accessibility violations found');
   });
 
+  it('does not claim an all-clear when the project config suppressed violations', () => {
+    const suppressed = [
+      { violation: { id: 'region' }, reason: 'disabled-rule' },
+      { violation: { id: 'region' }, reason: 'disabled-rule' },
+      { violation: { id: 'heading-order' }, reason: 'below-severity' },
+    ];
+
+    const body = renderSummaryCommentBody([], [], suppressed);
+
+    expect(body).not.toContain('No accessibility violations found');
+    expect(body).toContain('No accessibility violations to fix');
+    expect(body).toContain('3 suppressed by project config (region ×2, heading-order ×1)');
+  });
+
+  it('adds the suppressed count after the other sections', () => {
+    const body = renderSummaryCommentBody([{}], [], [{ violation: { id: 'region' } }]);
+
+    expect(body).toContain('1 verified fix**');
+    expect(body).toContain('1 suppressed by project config (region ×1)');
+  });
+
   it('counts inline suggestions and lists summary-only items with why they are not inline', () => {
     const inline = [{}, {}];
     const summary = [

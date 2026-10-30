@@ -65,6 +65,12 @@ from 'a11y-autofix'`) call into it.
 - `cli/` is the sole consumer of `scan.ts` and the only place that does I/O
   with the terminal (diff rendering, `process.exitCode`); it holds no
   pipeline logic of its own.
+- `config/` loads and validates project config (no I/O beyond reading
+  the config file / package.json) and holds the pure helpers scan.ts uses
+  to apply it (`createIgnoreMatcher`, `suppressionReason`). It uses
+  axe-core only for its rule list, to validate `disableRules`. `cli/` is
+  the only module that loads config; `scan()` takes the settings as
+  plain options.
 - `src/index.ts` re-exports the four pipeline modules plus `scan` for
   programmatic (non-CLI) use as a library — this is what
   `import { scan } from 'a11y-autofix'` resolves to, wired via
@@ -1074,12 +1080,48 @@ node_modules/**`; also added a `packages/*/scripts/**/*.js` block
       only); class methods (`this.handleX`) and Options API Vue aren't
       followed; no real-model run yet.
 
+- [x] Project config file (2026-10-30): `src/config/` reads
+      `a11y-autofix.config.json` from the project root (`process.cwd()`,
+      or `runScan`'s `projectRoot`), else the `"a11y-autofix"` key in
+      `package.json`; the file wins and the two are never merged. Zod
+      strict schema: `apiKeyEnv` (env var name, default
+      `ANTHROPIC_API_KEY`), `ignore` (globs, via `picomatch`, relative to
+      the root), `disableRules` (validated against axe-core's rule list),
+      `severity` (`minor`…`critical`, default `minor`), `browser`. Unknown
+      keys are errors (typos fail loudly); an `apiKey` key gets its own
+      "keys don't belong in config" error. Precedence, per setting: a flag beats
+      the config, which beats the default; a flag replaces a list rather than appending.
+      New flags: `--no-browser`, `--ignore` and `--disable-rule`
+      (repeatable), `--severity`, `--api-key-env`. Flags are validated
+      with the same schema. `scan()` gains `ignore`/`root`,
+      `disableRules`, `severity`, `apiKeyEnv` options; `ScanResult` gains
+      `suppressed` (one entry per source element, with `reason:
+'disabled-rule' | 'below-severity'`) and `ignoredFiles`. Suppressed
+      violations are detected but never sent to the model, are counted in
+      the summary line ("N suppressed by config (rule ×n, …)"), don't
+      affect the exit code, and turn "No accessibility violations found"
+      into "No accessibility violations to fix … N suppressed by config".
+      `--json` adds `config: { source: 'file' | 'package' | 'none', path,
+settings }`. `apiKeyEnv` is passed to `generateFix` only when set
+      explicitly; an unset named variable is a per-violation error, never
+      a fallback to `ANTHROPIC_API_KEY`. The Action passes
+      `--api-key-env ANTHROPIC_API_KEY` so its own input always wins, and
+      its PR comment counts suppressed violations. Tests:
+      `test/config.test.ts` (loading and precedence at every layer,
+      invalid config, ignore really skipping a file that would fail to
+      render, suppression per rule and per severity level, exit code),
+      `apiKeyEnv` in `test/generate-prompt.test.ts`, the PR comment in
+      `action/lib/render.test.js`. **Limitations:** the VS Code extension
+      doesn't read the config yet; verify/ still rejects a fix that
+      introduces a violation of a disabled rule (conservative, not
+      hidden); no `--config <path>` flag.
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal
-  output, a config file for the API key and ignore patterns, and an
-  accept/reject prompt for individual fixes (right now `scan --write`
-  applies every verified fix unconditionally).
+  output, and an accept/reject prompt for individual fixes (right now
+  `scan --write` applies every verified fix unconditionally). The config
+  file is done; see "Project config file" above.
 
 ## Open decisions (revisit before implementing)
 
