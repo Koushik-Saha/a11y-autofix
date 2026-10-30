@@ -1116,6 +1116,40 @@ settings }`. `apiKeyEnv` is passed to `generateFix` only when set
       introduces a violation of a disabled rule (conservative, not
       hidden); no `--config <path>` flag.
 
+- [x] Real-model eval harness (2026-10-30): `scripts/eval/` (outside
+      `src/`, not published, typechecked by `scripts/tsconfig.json`).
+      `npm run eval:real` runs `scan()` (detect → context → generate →
+      verify plus its retry) on every component fixture in
+      `test/fixtures/` and its subdirectories. It needs
+      `ANTHROPIC_API_KEY` and otherwise exits 1 before calling anything;
+      it is never in `npm test` or CI. Two observational hooks make this
+      possible without reimplementing the pipeline: `generateFix`'s
+      `onUsage` (each call's tokens, from `response.usage`, including
+      `output_tokens_details.thinking_tokens`) and `resolveFix`/`scan`'s
+      `onAttempt` (each attempt's patch and verification, so first
+      attempts rejected before a successful retry are kept). Per case
+      (key `<fixture>#<rule>#<n>`): status, confidence, old and new
+      snippet, failure reason, every attempt, tokens and cost. The report
+      (`evals/report-<date>.md`, gitignored except `evals/baseline.md`)
+      has acceptance per rule, a per-fixture table with cost, every
+      rejected attempt quoted in full, and the average cost per violation
+      and per 100 violations. Prices are in `scripts/eval/pricing.ts` (as
+      of 2026-10-06); an unlisted model's cost is "unknown", never
+      guessed. The run data is embedded as fenced JSON between markers,
+      with a fence longer than any backtick run in it. `eval:compare` exits 1 if any baseline-verified case is now
+      unverified, errored or missing, and 2 if it can't compare (no
+      report, empty baseline, different render mode, damaged data);
+      `--only` runs aren't gated on the skipped fixtures. **Baseline:**
+      `evals/baseline.md` is an empty marker. No API key was available
+      when the harness was added, so there are no real results yet, and
+      none were fabricated. Tests: `test/eval-harness.test.ts` (Anthropic
+      SDK mocked, everything else real: outcomes, retries, usage and
+      cost, report round-trip, gate on a doctored report, exit codes,
+      missing key). **Limitations:** one run per case, so model
+      nondeterminism can cause a flaky regression; the gate is
+      pass/fail per case, not per acceptance rate; detect-only regressions
+      show as "missing".
+
 ### Not started
 
 - Remaining `cli/` polish, none of it blocking: colored/richer terminal

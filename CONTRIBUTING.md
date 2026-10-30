@@ -35,6 +35,17 @@ Almost the entire suite (`detect/`, `context/`, `verify/`, `scan/`, `cli/`) runs
 
 The one exception is `generate/`, which calls the live Claude API and has no unit tests of its own for that reason. Everywhere else in the suite that needs a patch (`scan.test.ts`, `cli.test.ts`, `pipeline-e2e.test.ts`), `generateFix` is mocked with a hand-authored fix via `vi.mock('../src/generate', ...)` — this exercises the real pipeline around it (AST location, patch application, re-verification) without needing `ANTHROPIC_API_KEY`. You only need real credentials if you're testing `generate/` itself.
 
+## Changing the `generate/` prompt or model
+
+The test suite can't tell you whether the model writes better or worse fixes. The real-model eval can:
+
+```sh
+ANTHROPIC_API_KEY=… npm run eval:real    # writes evals/report-<date>.md (real API calls, costs money)
+npm run eval:compare                      # newest report vs the committed evals/baseline.md
+```
+
+`eval:compare` exits 1 if any violation the baseline verified is no longer verified, and 2 if it can't compare (no report, no baseline yet, or a different `--browser` mode). Run it before and after a prompt change, and include the comparison in the PR. If the change is an intended improvement, record a new baseline with `npm run eval:real -- --update-baseline` and commit `evals/baseline.md`. Neither command runs in `npm test` or CI. See the README's [real-model eval](./README.md#real-model-eval) section.
+
 ## Adding a new WCAG rule / fixture
 
 See `test/fixtures/` for the existing pattern — one small component per violation type, plus `test/pipeline-e2e.test.ts` which runs the full pipeline against all of them. If you add support for a new axe-core rule, add a fixture that triggers it and a case in `pipeline-e2e.test.ts` alongside it.

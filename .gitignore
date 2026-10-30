@@ -9,3 +9,6 @@ coverage/
 test/tmp-*/
 *.vsix
 *.tgz
+# Real-model eval reports (npm run eval:real); only the baseline is committed.
+evals/*
+!evals/baseline.md

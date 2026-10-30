@@ -62,6 +62,19 @@ export interface PreviousAttempt {
   newViolations: AxeViolation[];
 }
 
+/** Token usage of one model call, as the API reported it. */
+export interface GenerationUsage {
+  /** The model that served the call (the response's `model`). */
+  model: string;
+  inputTokens: number;
+  /** Includes thinking tokens: output is billed as one total. */
+  outputTokens: number;
+  /** The part of `outputTokens` spent on reasoning, when the API reports it. */
+  thinkingTokens: number | null;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
 export interface GenerateFixOptions {
   context: FixContext;
   /** When set, this call is a retry of a previously-rejected attempt. */
@@ -72,6 +85,12 @@ export interface GenerateFixOptions {
    * falling back to `ANTHROPIC_API_KEY`.
    */
   apiKeyEnv?: string;
+  /**
+   * Called once per model call with its token usage — for cost
+   * accounting (e.g. the eval harness in scripts/eval/). Purely
+   * observational.
+   */
+  onUsage?: (usage: GenerationUsage, context: FixContext) => void;
 }
 
 /**
@@ -242,7 +261,7 @@ function buildUserPrompt(
 }
 
 export async function generateFix(options: GenerateFixOptions): Promise<Patch> {
-  const { context, previousAttempt, apiKeyEnv } = options;
+  const { context, previousAttempt, apiKeyEnv, onUsage } = options;
 
   // Before creating the client: a not-auto-fixable violation never costs
   // a model call.
@@ -268,6 +287,18 @@ export async function generateFix(options: GenerateFixOptions): Promise<Patch> {
     messages: [{ role: 'user', content: buildUserPrompt(context, previousAttempt, contrastPlan) }],
     output_config: { format: zodOutputFormat(PatchSuggestionSchema) },
   });
+
+  onUsage?.(
+    {
+      model: response.model,
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      thinkingTokens: response.usage.output_tokens_details?.thinking_tokens ?? null,
+      cacheCreationInputTokens: response.usage.cache_creation_input_tokens ?? 0,
+      cacheReadInputTokens: response.usage.cache_read_input_tokens ?? 0,
+    },
+    context,
+  );
 
   if (!response.parsed_output) {
     throw new Error(
